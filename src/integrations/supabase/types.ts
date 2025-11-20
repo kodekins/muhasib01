@@ -18,6 +18,10 @@ export interface Database {
           account_type: 'asset' | 'liability' | 'equity' | 'revenue' | 'expense'
           parent_account_id: string | null
           is_active: boolean
+          opening_balance: number
+          opening_balance_date: string | null
+          opening_balance_recorded: boolean
+          opening_balance_entry_id: string | null
           created_at: string
           updated_at: string
         }

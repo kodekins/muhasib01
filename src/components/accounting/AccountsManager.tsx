@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
-import { Wallet, TrendingUp, TrendingDown, DollarSign, FileText, Plus } from 'lucide-react';
+import { Wallet, TrendingUp, TrendingDown, DollarSign, FileText, Plus, Edit } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 
@@ -20,6 +20,10 @@ interface Account {
   account_type: 'asset' | 'liability' | 'equity' | 'revenue' | 'expense';
   is_active: boolean;
   balance?: number;
+  opening_balance?: number;
+  opening_balance_date?: string | null;
+  opening_balance_recorded?: boolean;
+  opening_balance_entry_id?: string | null;
 }
 
 interface JournalEntry {
@@ -41,6 +45,8 @@ export function AccountsManager() {
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>([]);
   const [isJournalDialogOpen, setIsJournalDialogOpen] = useState(false);
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
+  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
+  const [editingAccount, setEditingAccount] = useState<Account | null>(null);
   const [filter, setFilter] = useState('all');
   const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
@@ -50,7 +56,19 @@ export function AccountsManager() {
     code: '',
     account_type: 'asset' as 'asset' | 'liability' | 'equity' | 'revenue' | 'expense',
     parent_account_id: '',
-    description: ''
+    description: '',
+    opening_balance: '',
+    opening_balance_date: new Date().toISOString().split('T')[0]
+  });
+
+  const [editAccount, setEditAccount] = useState({
+    name: '',
+    code: '',
+    account_type: 'asset' as 'asset' | 'liability' | 'equity' | 'revenue' | 'expense',
+    parent_account_id: '',
+    description: '',
+    opening_balance: '',
+    opening_balance_date: new Date().toISOString().split('T')[0]
   });
 
   useEffect(() => {
@@ -288,8 +306,12 @@ export function AccountsManager() {
         return;
       }
 
+      // Parse opening balance
+      const openingBalance = parseFloat(newAccount.opening_balance) || 0;
+      const hasOpeningBalance = openingBalance !== 0;
+
       // Create account
-      const { error } = await supabase
+      const { data: createdAccount, error } = await supabase
         .from('accounts')
         .insert([{
           user_id: userData.user.id,
@@ -297,14 +319,24 @@ export function AccountsManager() {
           code: newAccount.code.trim(),
           account_type: newAccount.account_type,
           parent_account_id: newAccount.parent_account_id || null,
-          is_active: true
-        }]);
+          is_active: true,
+          opening_balance: hasOpeningBalance ? openingBalance : 0,
+          opening_balance_date: hasOpeningBalance ? newAccount.opening_balance_date : null,
+          opening_balance_recorded: false
+        }])
+        .select()
+        .single();
 
       if (error) throw error;
 
+      // If there's an opening balance, create a journal entry
+      if (hasOpeningBalance && createdAccount) {
+        await createOpeningBalanceEntry(createdAccount.id, openingBalance, newAccount.opening_balance_date, userData.user.id);
+      }
+
       toast({ 
         title: 'Success', 
-        description: `Account "${newAccount.name}" created successfully!` 
+        description: `Account "${newAccount.name}" created successfully!${hasOpeningBalance ? ` with opening balance of $${Math.abs(openingBalance).toFixed(2)}` : ''}` 
       });
 
       setIsCreateDialogOpen(false);
@@ -328,8 +360,152 @@ export function AccountsManager() {
       code: '',
       account_type: 'asset',
       parent_account_id: '',
-      description: ''
+      description: '',
+      opening_balance: '',
+      opening_balance_date: new Date().toISOString().split('T')[0]
     });
+  };
+
+  const createOpeningBalanceEntry = async (
+    accountId: string, 
+    openingBalance: number, 
+    balanceDate: string,
+    userId: string
+  ) => {
+    try {
+      // Get or create "Opening Balance Equity" account
+      let { data: equityAccount } = await supabase
+        .from('accounts')
+        .select('id')
+        .eq('user_id', userId)
+        .eq('code', '3900')
+        .single();
+
+      // If opening balance equity account doesn't exist, create it
+      if (!equityAccount) {
+        const { data: newEquityAccount, error: equityError } = await supabase
+          .from('accounts')
+          .insert([{
+            user_id: userId,
+            name: 'Opening Balance Equity',
+            code: '3900',
+            account_type: 'equity',
+            is_active: true
+          }])
+          .select()
+          .single();
+
+        if (equityError) throw equityError;
+        equityAccount = newEquityAccount;
+      }
+
+      // Generate entry number
+      const { data: lastEntry } = await supabase
+        .from('journal_entries')
+        .select('entry_number')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .single();
+
+      const lastNumber = lastEntry?.entry_number 
+        ? parseInt(lastEntry.entry_number.replace(/\D/g, '')) 
+        : 0;
+      const entryNumber = `JE-${String(lastNumber + 1).padStart(6, '0')}`;
+
+      // Determine debit and credit based on account type and balance
+      const account = accounts.find(a => a.id === accountId) || 
+        { account_type: newAccount.account_type };
+      
+      const isDebitAccount = ['asset', 'expense'].includes(account.account_type);
+      const absBalance = Math.abs(openingBalance);
+
+      let debitAccountId, creditAccountId, amount;
+      
+      if (isDebitAccount) {
+        // For assets/expenses: positive opening balance is debit
+        if (openingBalance >= 0) {
+          debitAccountId = accountId;
+          creditAccountId = equityAccount.id;
+          amount = absBalance;
+        } else {
+          // Negative opening balance is credit
+          debitAccountId = equityAccount.id;
+          creditAccountId = accountId;
+          amount = absBalance;
+        }
+      } else {
+        // For liabilities/equity/revenue: positive opening balance is credit
+        if (openingBalance >= 0) {
+          debitAccountId = equityAccount.id;
+          creditAccountId = accountId;
+          amount = absBalance;
+        } else {
+          // Negative opening balance is debit
+          debitAccountId = accountId;
+          creditAccountId = equityAccount.id;
+          amount = absBalance;
+        }
+      }
+
+      // Create journal entry
+      const { data: journalEntry, error: jeError } = await supabase
+        .from('journal_entries')
+        .insert([{
+          user_id: userId,
+          entry_number: entryNumber,
+          entry_date: balanceDate,
+          description: `Opening Balance - ${newAccount.name}`,
+          reference: 'Opening Balance',
+          status: 'posted',
+          total_debits: amount,
+          total_credits: amount
+        }])
+        .select()
+        .single();
+
+      if (jeError) throw jeError;
+
+      // Create journal entry lines
+      const { error: linesError } = await supabase
+        .from('journal_entry_lines')
+        .insert([
+          {
+            journal_entry_id: journalEntry.id,
+            account_id: debitAccountId,
+            description: `Opening Balance - ${newAccount.name}`,
+            debit: amount,
+            credit: 0
+          },
+          {
+            journal_entry_id: journalEntry.id,
+            account_id: creditAccountId,
+            description: `Opening Balance - ${newAccount.name}`,
+            debit: 0,
+            credit: amount
+          }
+        ]);
+
+      if (linesError) throw linesError;
+
+      // Update account to mark opening balance as recorded
+      await supabase
+        .from('accounts')
+        .update({
+          opening_balance_recorded: true,
+          opening_balance_entry_id: journalEntry.id
+        })
+        .eq('id', accountId);
+
+    } catch (error: any) {
+      console.error('Error creating opening balance entry:', error);
+      // Don't throw - account was created successfully, just log the error
+      toast({
+        title: 'Warning',
+        description: 'Account created but opening balance entry failed. You can manually create a journal entry.',
+        variant: 'destructive'
+      });
+    }
   };
 
   const getNextAvailableCode = (type: string): string => {
@@ -379,6 +555,252 @@ export function AccountsManager() {
       expense: 'Costs of doing business (e.g., Rent, Salaries, Utilities, COGS)'
     };
     return descriptions[type] || '';
+  };
+
+  const openEditDialog = (account: Account) => {
+    setEditingAccount(account);
+    setEditAccount({
+      name: account.name,
+      code: account.code,
+      account_type: account.account_type,
+      parent_account_id: account.parent_account_id || '',
+      description: '',
+      opening_balance: account.opening_balance?.toString() || '',
+      opening_balance_date: account.opening_balance_date || new Date().toISOString().split('T')[0]
+    });
+    setIsEditDialogOpen(true);
+  };
+
+  const updateAccount = async () => {
+    if (!editingAccount) return;
+
+    try {
+      // Validation
+      if (!editAccount.name.trim()) {
+        toast({ title: 'Error', description: 'Account name is required', variant: 'destructive' });
+        return;
+      }
+
+      if (!editAccount.code.trim()) {
+        toast({ title: 'Error', description: 'Account code is required', variant: 'destructive' });
+        return;
+      }
+
+      // Validate account code format (should be numeric)
+      if (!/^\d+$/.test(editAccount.code)) {
+        toast({ title: 'Error', description: 'Account code must contain only numbers', variant: 'destructive' });
+        return;
+      }
+
+      const { data: userData } = await supabase.auth.getUser();
+      if (!userData.user) {
+        toast({ title: 'Error', description: 'User not authenticated', variant: 'destructive' });
+        return;
+      }
+
+      setIsLoading(true);
+
+      // Check if account code already exists (excluding current account)
+      if (editAccount.code !== editingAccount.code) {
+        const { data: existingAccount } = await supabase
+          .from('accounts')
+          .select('id')
+          .eq('user_id', userData.user.id)
+          .eq('code', editAccount.code)
+          .neq('id', editingAccount.id)
+          .single();
+
+        if (existingAccount) {
+          toast({ 
+            title: 'Error', 
+            description: `Account code ${editAccount.code} already exists. Please use a unique code.`, 
+            variant: 'destructive' 
+          });
+          return;
+        }
+      }
+
+      // Parse opening balance
+      const newOpeningBalance = parseFloat(editAccount.opening_balance) || 0;
+      const oldOpeningBalance = editingAccount.opening_balance || 0;
+      const hasNewOpeningBalance = newOpeningBalance !== oldOpeningBalance && newOpeningBalance !== 0;
+      const needsOpeningBalanceEntry = hasNewOpeningBalance && !editingAccount.opening_balance_recorded;
+
+      // Update account
+      const { error } = await supabase
+        .from('accounts')
+        .update({
+          name: editAccount.name.trim(),
+          code: editAccount.code.trim(),
+          account_type: editAccount.account_type,
+          parent_account_id: editAccount.parent_account_id || null,
+          opening_balance: newOpeningBalance,
+          opening_balance_date: newOpeningBalance !== 0 ? editAccount.opening_balance_date : null
+        })
+        .eq('id', editingAccount.id);
+
+      if (error) throw error;
+
+      // If there's a new opening balance and no previous entry, create one
+      if (needsOpeningBalanceEntry) {
+        await createOpeningBalanceEntry(
+          editingAccount.id, 
+          newOpeningBalance, 
+          editAccount.opening_balance_date, 
+          userData.user.id
+        );
+      }
+
+      // If opening balance changed and there was an existing entry, update it
+      if (hasNewOpeningBalance && editingAccount.opening_balance_recorded && editingAccount.opening_balance_entry_id) {
+        await updateOpeningBalanceEntry(
+          editingAccount.opening_balance_entry_id,
+          editingAccount.id,
+          newOpeningBalance,
+          oldOpeningBalance,
+          editAccount.opening_balance_date,
+          userData.user.id
+        );
+      }
+
+      toast({ 
+        title: 'Success', 
+        description: `Account "${editAccount.name}" updated successfully!` 
+      });
+
+      setIsEditDialogOpen(false);
+      setEditingAccount(null);
+      fetchAccounts();
+    } catch (error: any) {
+      console.error('Error updating account:', error);
+      toast({ 
+        title: 'Error', 
+        description: error.message || 'Failed to update account', 
+        variant: 'destructive' 
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const updateOpeningBalanceEntry = async (
+    entryId: string,
+    accountId: string,
+    newBalance: number,
+    oldBalance: number,
+    balanceDate: string,
+    userId: string
+  ) => {
+    try {
+      // Get or create "Opening Balance Equity" account
+      let { data: equityAccount } = await supabase
+        .from('accounts')
+        .select('id')
+        .eq('user_id', userId)
+        .eq('code', '3900')
+        .single();
+
+      if (!equityAccount) {
+        const { data: newEquityAccount, error: equityError } = await supabase
+          .from('accounts')
+          .insert([{
+            user_id: userId,
+            name: 'Opening Balance Equity',
+            code: '3900',
+            account_type: 'equity',
+            is_active: true
+          }])
+          .select()
+          .single();
+
+        if (equityError) throw equityError;
+        equityAccount = newEquityAccount;
+      }
+
+      // Determine debit and credit based on account type and balance
+      const account = accounts.find(a => a.id === accountId) || editingAccount!;
+      const isDebitAccount = ['asset', 'expense'].includes(account.account_type);
+      const absBalance = Math.abs(newBalance);
+
+      let debitAccountId, creditAccountId, amount;
+      
+      if (isDebitAccount) {
+        if (newBalance >= 0) {
+          debitAccountId = accountId;
+          creditAccountId = equityAccount.id;
+          amount = absBalance;
+        } else {
+          debitAccountId = equityAccount.id;
+          creditAccountId = accountId;
+          amount = absBalance;
+        }
+      } else {
+        if (newBalance >= 0) {
+          debitAccountId = equityAccount.id;
+          creditAccountId = accountId;
+          amount = absBalance;
+        } else {
+          debitAccountId = accountId;
+          creditAccountId = equityAccount.id;
+          amount = absBalance;
+        }
+      }
+
+      // Update journal entry
+      await supabase
+        .from('journal_entries')
+        .update({
+          entry_date: balanceDate,
+          description: `Opening Balance - ${editAccount.name}`,
+          total_debits: amount,
+          total_credits: amount
+        })
+        .eq('id', entryId);
+
+      // Update journal entry lines
+      const { data: lines } = await supabase
+        .from('journal_entry_lines')
+        .select('id, account_id')
+        .eq('journal_entry_id', entryId);
+
+      if (lines && lines.length === 2) {
+        // Update debit line
+        const debitLine = lines.find(l => l.account_id === debitAccountId || l.account_id === accountId);
+        if (debitLine) {
+          await supabase
+            .from('journal_entry_lines')
+            .update({
+              account_id: debitAccountId,
+              description: `Opening Balance - ${editAccount.name}`,
+              debit: amount,
+              credit: 0
+            })
+            .eq('id', debitLine.id);
+        }
+
+        // Update credit line
+        const creditLine = lines.find(l => l.id !== debitLine?.id);
+        if (creditLine) {
+          await supabase
+            .from('journal_entry_lines')
+            .update({
+              account_id: creditAccountId,
+              description: `Opening Balance - ${editAccount.name}`,
+              debit: 0,
+              credit: amount
+            })
+            .eq('id', creditLine.id);
+        }
+      }
+
+    } catch (error: any) {
+      console.error('Error updating opening balance entry:', error);
+      toast({
+        title: 'Warning',
+        description: 'Account updated but opening balance entry update failed. You may need to manually adjust the journal entry.',
+        variant: 'destructive'
+      });
+    }
   };
 
   return (
@@ -441,13 +863,23 @@ export function AccountsManager() {
                           <TableCell>{account.name}</TableCell>
                           <TableCell className="text-right">{formatBalance(account)}</TableCell>
                           <TableCell className="text-right">
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => openJournalEntries(account)}
-                            >
-                              View Entries
-                            </Button>
+                            <div className="flex gap-2 justify-end">
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => openEditDialog(account)}
+                              >
+                                <Edit className="h-4 w-4 mr-1" />
+                                Edit
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => openJournalEntries(account)}
+                              >
+                                View Entries
+                              </Button>
+                            </div>
                           </TableCell>
                         </TableRow>
                       ))}
@@ -487,13 +919,23 @@ export function AccountsManager() {
                         <TableCell>{account.name}</TableCell>
                         <TableCell className="text-right">{formatBalance(account)}</TableCell>
                         <TableCell className="text-right">
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => openJournalEntries(account)}
-                          >
-                            View Entries
-                          </Button>
+                          <div className="flex gap-2 justify-end">
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => openEditDialog(account)}
+                            >
+                              <Edit className="h-4 w-4 mr-1" />
+                              Edit
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => openJournalEntries(account)}
+                            >
+                              View Entries
+                            </Button>
+                          </div>
                         </TableCell>
                       </TableRow>
                     ))}
@@ -622,6 +1064,55 @@ export function AccountsManager() {
               />
             </div>
 
+            {/* Opening Balance Section */}
+            <Card className="bg-blue-50 dark:bg-blue-950 border-blue-200 dark:border-blue-800">
+              <CardContent className="pt-4">
+                <h4 className="font-semibold mb-3 text-sm flex items-center gap-2">
+                  <DollarSign className="h-4 w-4" />
+                  Opening Balance (Optional)
+                </h4>
+                <p className="text-xs text-muted-foreground mb-3">
+                  If this account has an existing balance (from before you started using this system), enter it here. 
+                  A journal entry will be automatically created.
+                </p>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <Label>Opening Balance Amount</Label>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      value={newAccount.opening_balance}
+                      onChange={(e) => setNewAccount(prev => ({ ...prev, opening_balance: e.target.value }))}
+                      placeholder="0.00"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Enter positive number (e.g., 5000.00)
+                    </p>
+                  </div>
+                  <div>
+                    <Label>As of Date</Label>
+                    <Input
+                      type="date"
+                      value={newAccount.opening_balance_date}
+                      onChange={(e) => setNewAccount(prev => ({ ...prev, opening_balance_date: e.target.value }))}
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Date of the opening balance
+                    </p>
+                  </div>
+                </div>
+                <div className="mt-3 text-xs text-muted-foreground bg-white dark:bg-gray-900 p-3 rounded border">
+                  <p className="font-medium mb-1">How opening balances work:</p>
+                  <ul className="list-disc list-inside space-y-1">
+                    <li><strong>Assets & Expenses:</strong> Enter the balance as a positive number</li>
+                    <li><strong>Liabilities, Equity & Revenue:</strong> Enter the balance as a positive number</li>
+                    <li>A journal entry will be created automatically using "Opening Balance Equity" account</li>
+                    <li>Example: Bank account with $10,000 → enter 10000</li>
+                  </ul>
+                </div>
+              </CardContent>
+            </Card>
+
             {/* Account Code Reference Guide */}
             <Card className="bg-muted/50">
               <CardContent className="pt-4">
@@ -659,6 +1150,185 @@ export function AccountsManager() {
               </Button>
               <Button 
                 onClick={() => { setIsCreateDialogOpen(false); resetForm(); }} 
+                variant="outline"
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit Account Dialog */}
+      <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Edit Account</DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div>
+              <Label>Account Type *</Label>
+              <Select 
+                value={editAccount.account_type} 
+                onValueChange={(value: any) => setEditAccount(prev => ({ ...prev, account_type: value }))}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="asset">
+                    <div className="flex items-center gap-2">
+                      <Wallet className="h-4 w-4 text-green-500" />
+                      Asset
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="liability">
+                    <div className="flex items-center gap-2">
+                      <TrendingDown className="h-4 w-4 text-red-500" />
+                      Liability
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="equity">
+                    <div className="flex items-center gap-2">
+                      <DollarSign className="h-4 w-4 text-blue-500" />
+                      Equity
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="revenue">
+                    <div className="flex items-center gap-2">
+                      <TrendingUp className="h-4 w-4 text-emerald-500" />
+                      Revenue
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="expense">
+                    <div className="flex items-center gap-2">
+                      <TrendingDown className="h-4 w-4 text-orange-500" />
+                      Expense
+                    </div>
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground mt-1">
+                {getAccountTypeDescription(editAccount.account_type)}
+              </p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label>Account Code *</Label>
+                <Input
+                  type="text"
+                  value={editAccount.code}
+                  onChange={(e) => setEditAccount(prev => ({ ...prev, code: e.target.value }))}
+                  placeholder="e.g., 1010"
+                  maxLength={10}
+                />
+              </div>
+
+              <div>
+                <Label>Account Name *</Label>
+                <Input
+                  type="text"
+                  value={editAccount.name}
+                  onChange={(e) => setEditAccount(prev => ({ ...prev, name: e.target.value }))}
+                  placeholder="e.g., Checking Account"
+                />
+              </div>
+            </div>
+
+            <div>
+              <Label>Parent Account (Optional)</Label>
+              <Select 
+                value={editAccount.parent_account_id || 'none'} 
+                onValueChange={(value) => setEditAccount(prev => ({ ...prev, parent_account_id: value === 'none' ? '' : value }))}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="None (Top-level account)" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">None (Top-level account)</SelectItem>
+                  {accounts
+                    .filter(acc => acc.account_type === editAccount.account_type && acc.id !== editingAccount?.id)
+                    .map(account => (
+                      <SelectItem key={account.id} value={account.id}>
+                        {account.code} - {account.name}
+                      </SelectItem>
+                    ))
+                  }
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground mt-1">
+                Create a sub-account under an existing account
+              </p>
+            </div>
+
+            <div>
+              <Label>Description (Optional)</Label>
+              <Textarea
+                value={editAccount.description}
+                onChange={(e) => setEditAccount(prev => ({ ...prev, description: e.target.value }))}
+                placeholder="Brief description of this account's purpose..."
+                rows={3}
+              />
+            </div>
+
+            {/* Opening Balance Section */}
+            <Card className="bg-blue-50 dark:bg-blue-950 border-blue-200 dark:border-blue-800">
+              <CardContent className="pt-4">
+                <h4 className="font-semibold mb-3 text-sm flex items-center gap-2">
+                  <DollarSign className="h-4 w-4" />
+                  Opening Balance
+                </h4>
+                {editingAccount?.opening_balance_recorded ? (
+                  <div className="mb-3 p-3 bg-yellow-50 dark:bg-yellow-950 border border-yellow-200 dark:border-yellow-800 rounded">
+                    <p className="text-xs text-yellow-800 dark:text-yellow-200">
+                      ⚠️ This account already has an opening balance journal entry. 
+                      Changing the amount will update the existing entry.
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground mb-3">
+                    Set or update the opening balance for this account. 
+                    A journal entry will be created or updated automatically.
+                  </p>
+                )}
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <Label>Opening Balance Amount</Label>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      value={editAccount.opening_balance}
+                      onChange={(e) => setEditAccount(prev => ({ ...prev, opening_balance: e.target.value }))}
+                      placeholder="0.00"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Current: ${editingAccount?.opening_balance?.toFixed(2) || '0.00'}
+                    </p>
+                  </div>
+                  <div>
+                    <Label>As of Date</Label>
+                    <Input
+                      type="date"
+                      value={editAccount.opening_balance_date}
+                      onChange={(e) => setEditAccount(prev => ({ ...prev, opening_balance_date: e.target.value }))}
+                    />
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <div className="flex gap-2 pt-2">
+              <Button 
+                onClick={updateAccount} 
+                disabled={isLoading || !editAccount.name.trim() || !editAccount.code.trim()}
+                className="flex-1"
+              >
+                {isLoading ? 'Updating...' : 'Update Account'}
+              </Button>
+              <Button 
+                onClick={() => { setIsEditDialogOpen(false); setEditingAccount(null); }} 
                 variant="outline"
               >
                 Cancel
