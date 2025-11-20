@@ -32,7 +32,13 @@ export function ChatSidebar({
     <div className="flex flex-col h-full bg-sidebar border-r border-sidebar-border">
       {/* Header */}
       <div className="p-4 border-b border-sidebar-border">
-        <h1 className="text-lg font-semibold text-sidebar-foreground">AI Accountant</h1>
+        <div className="flex items-center justify-center">
+          <img 
+            src="/muhasib logo.png" 
+            alt="Muhasib Logo" 
+            className="h-10 w-auto object-contain"
+          />
+        </div>
       </div>
       
       {/* Navigation */}

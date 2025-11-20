@@ -2,8 +2,10 @@
 import { createClient } from '@supabase/supabase-js';
 import type { Database } from './types';
 
-const SUPABASE_URL = "https://tgshonwmthturuxeceqr.supabase.co";
-const SUPABASE_PUBLISHABLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRnc2hvbndtdGh0dXJ1eGVjZXFyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTcwMDczNDAsImV4cCI6MjA3MjU4MzM0MH0.qJjMcYCkOKQsW2qmN1ptHSD1erQE16l5LHV0Wq4FW4A";
+// UPDATE THESE WITH YOUR NEW PROJECT KEYS FROM:
+// https://supabase.com/dashboard/project/oboknyalxbdioqgnzhrs/settings/api
+const SUPABASE_URL = "https://oboknyalxbdioqgnzhrs.supabase.co";
+const SUPABASE_PUBLISHABLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9ib2tueWFseGJkaW9xZ256aHJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM0OTk4MTQsImV4cCI6MjA3OTA3NTgxNH0.2yM2twgdeoSqrofYWMZ2NoL_O2WL6fX3atHs2hz46Fw"; // Get from Settings → API
 
 // Import the supabase client like this:
 // import { supabase } from "@/integrations/supabase/client";

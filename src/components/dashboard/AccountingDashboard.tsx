@@ -13,6 +13,8 @@ import {
 } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
+import { ExportService } from '@/services';
+import { ExportButton } from '@/components/ui/export-button';
 
 interface Transaction {
   id: string;
@@ -76,6 +78,9 @@ export function AccountingDashboard() {
     try {
       setLoading(true);
       
+      const { data: userData } = await supabase.auth.getUser();
+      if (!userData.user) return;
+      
       // Fetch recent transactions with related data
       const { data: transactionsData, error: transactionsError } = await supabase
         .from('transactions')
@@ -98,32 +103,55 @@ export function AccountingDashboard() {
 
       if (accountsError) throw accountsError;
 
-      // Calculate financial summary
-      const { data: summaryData, error: summaryError } = await supabase
-        .from('transactions')
-        .select('amount, account:accounts(account_type)');
+      // Calculate financial summary FROM CHART OF ACCOUNTS (Journal Entries)
+      // This is the correct double-entry bookkeeping approach
+      const { data: journalLines, error: journalError } = await supabase
+        .from('journal_entry_lines')
+        .select(`
+          debit,
+          credit,
+          account:accounts(code, account_type)
+        `)
+        .eq('account.user_id', userData.user.id);
 
-      if (summaryError) throw summaryError;
+      if (journalError) {
+        console.error('Error fetching journal lines:', journalError);
+        // Fallback to old method if journal entries fail
+        throw journalError;
+      }
 
       let totalRevenue = 0;
       let totalExpenses = 0;
       let totalAssets = 0;
+      let totalLiabilities = 0;
 
-      summaryData?.forEach((transaction: any) => {
-        const amount = parseFloat(transaction.amount);
-        const accountType = transaction.account?.account_type;
+      // Calculate from Chart of Accounts (proper double-entry bookkeeping)
+      journalLines?.forEach((line: any) => {
+        const debit = parseFloat(line.debit || 0);
+        const credit = parseFloat(line.credit || 0);
+        const accountCode = line.account?.code;
+        const accountType = line.account?.account_type;
         
-        // Expenses are negative amounts, Income/Revenue are positive amounts
-        if (amount < 0) {
-          // This is an expense (negative amount)
-          totalExpenses += Math.abs(amount); // Convert to positive for display
-        } else if (amount > 0) {
-          // This is income/revenue (positive amount)
-          if (accountType === 'revenue') {
-            totalRevenue += amount;
-          } else if (accountType === 'asset') {
-            totalAssets += amount;
-          }
+        if (!accountCode) return;
+
+        // Revenue accounts (4000-4999): Credits increase revenue
+        if (accountType === 'revenue' || (accountCode >= '4000' && accountCode < '5000')) {
+          totalRevenue += credit; // Revenue is credited
+        }
+        
+        // Expense accounts (5000-5999): Debits increase expenses
+        else if (accountType === 'expense' || (accountCode >= '5000' && accountCode < '6000')) {
+          totalExpenses += debit; // Expenses are debited
+        }
+        
+        // Asset accounts (1000-1999): Debits increase, Credits decrease
+        else if (accountType === 'asset' || (accountCode >= '1000' && accountCode < '2000')) {
+          totalAssets += (debit - credit); // Net asset balance
+        }
+        
+        // Liability accounts (2000-2999): Credits increase, Debits decrease
+        else if (accountType === 'liability' || (accountCode >= '2000' && accountCode < '3000')) {
+          totalLiabilities += (credit - debit); // Net liability balance
         }
       });
 
@@ -240,7 +268,17 @@ export function AccountingDashboard() {
         <TabsContent value="transactions" className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle>Recent Transactions</CardTitle>
+              <div className="flex justify-between items-center">
+                <CardTitle>Recent Transactions</CardTitle>
+                <ExportButton
+                  data={transactions}
+                  onExport={(data, format) => {
+                    ExportService.exportTransactions(data, format);
+                  }}
+                  size="sm"
+                  variant="ghost"
+                />
+              </div>
             </CardHeader>
             <CardContent>
               <div className="space-y-3">
