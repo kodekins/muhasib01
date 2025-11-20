@@ -243,7 +243,7 @@ export class CreditMemoService {
             await StockMovementService.recordStockMovement({
               user_id: creditMemo.user_id,
               product_id: line.product_id,
-              movement_type: 'sale_return',
+              movement_type: 'return',
               quantity: line.quantity, // Positive for returns (adds back to inventory)
               unit_cost: product.cost || 0,
               reference_type: 'credit_memo',
