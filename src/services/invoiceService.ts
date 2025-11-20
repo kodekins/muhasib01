@@ -203,8 +203,13 @@ export class InvoiceService {
         return validation;
       }
 
-      // Calculate totals
-      const totals = this.calculateTotals(invoice.lines, invoice.discount_amount || 0);
+      // Calculate totals - use provided values if available, otherwise calculate
+      const calculatedTotals = this.calculateTotals(invoice.lines, invoice.discount_amount || 0);
+      
+      // Use provided values if they exist (from UI), otherwise use calculated
+      const subtotal = invoice.subtotal !== undefined ? invoice.subtotal : calculatedTotals.subtotal;
+      const tax_amount = invoice.tax_amount !== undefined ? invoice.tax_amount : calculatedTotals.tax_amount;
+      const total_amount = invoice.total_amount !== undefined ? invoice.total_amount : calculatedTotals.total_amount;
 
       // Determine document type
       const documentType = invoice.document_type || 'invoice';
@@ -229,12 +234,12 @@ export class InvoiceService {
           invoice_date: invoice.invoice_date,
           due_date: invoice.due_date,
           status: invoice.status || 'draft',
-          subtotal: totals.subtotal,
-          tax_amount: totals.tax_amount,
+          subtotal: subtotal,
+          tax_amount: tax_amount,
           discount_amount: invoice.discount_amount || 0,
-          total_amount: totals.total_amount,
+          total_amount: total_amount,
           amount_paid: 0,
-          balance_due: isQuotation ? 0 : totals.total_amount, // Quotations don't have balance
+          balance_due: isQuotation ? 0 : total_amount, // Quotations don't have balance
           notes: invoice.notes,
           terms: invoice.terms,
           footer: invoice.footer,
