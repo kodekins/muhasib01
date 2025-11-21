@@ -5,13 +5,14 @@
 
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import { Send, Edit, Eye, FileText } from 'lucide-react';
+import { Send, Edit, Eye, FileText, DollarSign } from 'lucide-react';
 
 interface Invoice {
   id: string;
   invoice_number: string;
   customer?: { name: string };
   total_amount: number;
+  balance_due?: number;
   status: string;
   invoice_date: string;
   due_date: string;
@@ -22,9 +23,10 @@ interface InvoiceListActionsProps {
   onSend: (invoiceNumber: string) => void;
   onEdit: (invoiceNumber: string) => void;
   onView: (invoiceNumber: string) => void;
+  onPay: (invoiceNumber: string) => void;
 }
 
-export function InvoiceListActions({ invoices, onSend, onEdit, onView }: InvoiceListActionsProps) {
+export function InvoiceListActions({ invoices, onSend, onEdit, onView, onPay }: InvoiceListActionsProps) {
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'draft': return 'text-yellow-600 bg-yellow-50 border-yellow-200';
@@ -80,6 +82,11 @@ export function InvoiceListActions({ invoices, onSend, onEdit, onView }: Invoice
                 <span className="font-semibold text-foreground">
                   {formatCurrency(invoice.total_amount)}
                 </span>
+                {invoice.balance_due !== undefined && invoice.balance_due !== invoice.total_amount && (
+                  <span className="text-orange-600">
+                    (Bal: {formatCurrency(invoice.balance_due)})
+                  </span>
+                )}
               </div>
             </div>
 
@@ -116,15 +123,27 @@ export function InvoiceListActions({ invoices, onSend, onEdit, onView }: Invoice
                 </>
               )}
               
-              {invoice.status === 'sent' && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => onEdit(invoice.invoice_number)}
-                  title="Edit Invoice"
-                >
-                  <Edit className="h-4 w-4" />
-                </Button>
+              {(invoice.status === 'sent' || invoice.status === 'partial') && (
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onEdit(invoice.invoice_number)}
+                    title="Edit Invoice"
+                  >
+                    <Edit className="h-4 w-4" />
+                  </Button>
+                  
+                  <Button
+                    variant="default"
+                    size="sm"
+                    onClick={() => onPay(invoice.invoice_number)}
+                    title="Record Payment"
+                    className="bg-green-600 hover:bg-green-700"
+                  >
+                    <DollarSign className="h-4 w-4" />
+                  </Button>
+                </>
               )}
             </div>
           </div>

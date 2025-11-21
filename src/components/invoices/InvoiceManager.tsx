@@ -59,8 +59,6 @@ export function InvoiceManager() {
     customer_id: '',
     invoice_date: new Date().toISOString().split('T')[0],
     due_date: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-    tax_rate: 0,
-    discount_amount: 0,
     notes: ''
   });
 
@@ -199,10 +197,18 @@ export function InvoiceManager() {
       tax_rate: product.taxable ? product.tax_rate : 0
     };
 
-    // Recalculate amount
-    const lineAmount = newLines[lineIndex].quantity * newLines[lineIndex].unit_price;
-    const discountAmount = lineAmount * ((newLines[lineIndex].discount_percent || 0) / 100);
-    newLines[lineIndex].amount = lineAmount - discountAmount;
+    // Recalculate amount (SAME AS SALES ORDER)
+    const qty = newLines[lineIndex].quantity;
+    const price = newLines[lineIndex].unit_price;
+    const discount = newLines[lineIndex].discount_percent || 0;
+    const tax = newLines[lineIndex].tax_rate || 0;
+    
+    const subtotal = qty * price;
+    const discountAmount = subtotal * (discount / 100);
+    const taxableAmount = subtotal - discountAmount;
+    const taxAmount = taxableAmount * (tax / 100);
+    
+    newLines[lineIndex].amount = taxableAmount + taxAmount;
 
     setLines(newLines);
   };
@@ -219,27 +225,59 @@ export function InvoiceManager() {
     const newLines = [...lines];
     newLines[index] = { ...newLines[index], [field]: value };
     
-    // Recalculate amount (includes line discount)
-    if (field === 'quantity' || field === 'unit_price' || field === 'discount_percent') {
-      const lineAmount = newLines[index].quantity * newLines[index].unit_price;
-      const discountAmount = lineAmount * ((newLines[index].discount_percent || 0) / 100);
-      newLines[index].amount = lineAmount - discountAmount;
+    // Recalculate amount (SAME AS SALES ORDER - includes discount and tax)
+    if (field === 'quantity' || field === 'unit_price' || field === 'discount_percent' || field === 'tax_rate') {
+      const qty = newLines[index].quantity;
+      const price = newLines[index].unit_price;
+      const discount = newLines[index].discount_percent || 0;
+      const tax = newLines[index].tax_rate || 0;
+      
+      const subtotal = qty * price;
+      const discountAmount = subtotal * (discount / 100);
+      const taxableAmount = subtotal - discountAmount;
+      const taxAmount = taxableAmount * (tax / 100);
+      
+      newLines[index].amount = taxableAmount + taxAmount;
     }
     
     setLines(newLines);
   };
 
   const calculateSubtotal = () => {
-    return lines.reduce((sum, line) => sum + line.amount, 0);
+    // Subtotal = sum of line amounts WITHOUT tax (taxable amount after discount)
+    return lines.reduce((sum, line) => {
+      const qty = line.quantity;
+      const price = line.unit_price;
+      const discount = line.discount_percent || 0;
+      
+      const subtotal = qty * price;
+      const discountAmount = subtotal * (discount / 100);
+      const taxableAmount = subtotal - discountAmount;
+      
+      return sum + taxableAmount;
+    }, 0);
   };
 
   const calculateTax = () => {
-    const subtotal = calculateSubtotal();
-    return subtotal * (newInvoice.tax_rate / 100);
+    // Tax = sum of all line-level taxes
+    return lines.reduce((sum, line) => {
+      const qty = line.quantity;
+      const price = line.unit_price;
+      const discount = line.discount_percent || 0;
+      const tax = line.tax_rate || 0;
+      
+      const subtotal = qty * price;
+      const discountAmount = subtotal * (discount / 100);
+      const taxableAmount = subtotal - discountAmount;
+      const taxAmount = taxableAmount * (tax / 100);
+      
+      return sum + taxAmount;
+    }, 0);
   };
 
   const calculateTotal = () => {
-    return calculateSubtotal() + calculateTax() - newInvoice.discount_amount;
+    // Total = subtotal + tax (line amounts already include tax)
+    return lines.reduce((sum, line) => sum + line.amount, 0);
   };
 
   const createInvoice = async () => {
@@ -271,7 +309,7 @@ export function InvoiceManager() {
           lines: validLines,
           subtotal: calculateSubtotal(),
           tax_amount: calculateTax(),
-          discount_amount: newInvoice.discount_amount,
+          discount_amount: 0, // No invoice-level discount (line-level only)
           total_amount: calculateTotal(),
           balance_due: calculateTotal()
         });
@@ -300,7 +338,7 @@ export function InvoiceManager() {
           lines: validLines,
           subtotal: calculateSubtotal(),
           tax_amount: calculateTax(),
-          discount_amount: newInvoice.discount_amount,
+          discount_amount: 0, // No invoice-level discount (line-level only)
           total_amount: calculateTotal(),
           balance_due: documentType === 'quotation' ? 0 : calculateTotal()
         }, { postJournalEntry: false });
@@ -494,8 +532,6 @@ export function InvoiceManager() {
       customer_id: '',
       invoice_date: new Date().toISOString().split('T')[0],
       due_date: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-      tax_rate: 0,
-      discount_amount: 0,
       notes: ''
     });
     setLines([{ description: '', quantity: 1, unit_price: 0, amount: 0, tax_rate: 0, discount_percent: 0 }]);
@@ -536,8 +572,6 @@ export function InvoiceManager() {
         customer_id: data.customer_id,
         invoice_date: data.invoice_date,
         due_date: data.due_date,
-        tax_rate: data.tax_amount && data.subtotal ? (data.tax_amount / data.subtotal) * 100 : 0,
-        discount_amount: data.discount_amount || 0,
         notes: data.notes || ''
       });
 
@@ -715,6 +749,7 @@ export function InvoiceManager() {
                         <TableHead className="w-20">Qty</TableHead>
                         <TableHead className="w-24">Price</TableHead>
                         <TableHead className="w-20">Disc%</TableHead>
+                        <TableHead className="w-20">Tax%</TableHead>
                         <TableHead className="w-24">Amount</TableHead>
                         <TableHead className="w-12"></TableHead>
                       </TableRow>
@@ -793,6 +828,16 @@ export function InvoiceManager() {
                             />
                           </TableCell>
                           <TableCell>
+                            <Input
+                              type="number"
+                              step="0.1"
+                              value={line.tax_rate || 0}
+                              onChange={(e) => updateLine(index, 'tax_rate', parseFloat(e.target.value) || 0)}
+                              className="w-20"
+                              placeholder="0"
+                            />
+                          </TableCell>
+                          <TableCell>
                             <div className="font-semibold">${line.amount.toFixed(2)}</div>
                           </TableCell>
                           <TableCell>
@@ -817,52 +862,25 @@ export function InvoiceManager() {
                 </Button>
               </div>
 
-              {/* Totals Section */}
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-3">
-                  <div>
-                    <Label>Tax Rate (%)</Label>
-                    <Input
-                      type="number"
-                      step="0.1"
-                      value={newInvoice.tax_rate}
-                      onChange={(e) => setNewInvoice(prev => ({ ...prev, tax_rate: parseFloat(e.target.value) || 0 }))}
-                      placeholder="0.0"
-                    />
-                  </div>
-                  <div>
-                    <Label>Invoice Discount ($)</Label>
-                    <Input
-                      type="number"
-                      step="0.01"
-                      value={newInvoice.discount_amount}
-                      onChange={(e) => setNewInvoice(prev => ({ ...prev, discount_amount: parseFloat(e.target.value) || 0 }))}
-                      placeholder="0.00"
-                    />
-                  </div>
+              {/* Totals Section - Line-level tax and discount only */}
+              <div className="space-y-2 text-right max-w-sm ml-auto">
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">Subtotal:</span>
+                  <span className="font-medium">${calculateSubtotal().toFixed(2)}</span>
                 </div>
-                <div className="space-y-2 text-right">
+                {calculateTax() > 0 && (
                   <div className="flex justify-between text-sm">
-                    <span className="text-muted-foreground">Subtotal:</span>
-                    <span className="font-medium">${calculateSubtotal().toFixed(2)}</span>
+                    <span className="text-muted-foreground">Tax:</span>
+                    <span className="font-medium">${calculateTax().toFixed(2)}</span>
                   </div>
-                  {newInvoice.tax_rate > 0 && (
-                    <div className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">Tax ({newInvoice.tax_rate}%):</span>
-                      <span className="font-medium">${calculateTax().toFixed(2)}</span>
-                    </div>
-                  )}
-                  {newInvoice.discount_amount > 0 && (
-                    <div className="flex justify-between text-sm text-red-600">
-                      <span>Discount:</span>
-                      <span>-${newInvoice.discount_amount.toFixed(2)}</span>
-                    </div>
-                  )}
-                  <div className="flex justify-between text-xl font-bold pt-2 border-t">
-                    <span>Total:</span>
-                    <span>${calculateTotal().toFixed(2)}</span>
-                  </div>
+                )}
+                <div className="flex justify-between text-xl font-bold pt-2 border-t">
+                  <span>Total:</span>
+                  <span>${calculateTotal().toFixed(2)}</span>
                 </div>
+                <p className="text-xs text-muted-foreground pt-2">
+                  Tax and discount are applied at line level
+                </p>
               </div>
 
               {/* Notes */}
@@ -1212,6 +1230,7 @@ export function InvoiceManager() {
                           <TableHead className="text-center">Qty</TableHead>
                           <TableHead className="text-right">Unit Price</TableHead>
                           <TableHead className="text-center">Discount</TableHead>
+                          <TableHead className="text-center">Tax</TableHead>
                           <TableHead className="text-right">Amount</TableHead>
                         </TableRow>
                       </TableHeader>
@@ -1223,6 +1242,9 @@ export function InvoiceManager() {
                             <TableCell className="text-right">${line.unit_price.toFixed(2)}</TableCell>
                             <TableCell className="text-center">
                               {line.discount_percent ? `${line.discount_percent}%` : '-'}
+                            </TableCell>
+                            <TableCell className="text-center">
+                              {line.tax_rate ? `${line.tax_rate}%` : '-'}
                             </TableCell>
                             <TableCell className="text-right font-medium">
                               ${line.amount.toFixed(2)}

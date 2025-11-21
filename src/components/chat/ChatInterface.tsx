@@ -169,6 +169,7 @@ export function ChatInterface({ messages, onSendMessage, isLoading = false }: Ch
                       onSend={(num) => onSendMessage(`send invoice ${num}`)}
                       onEdit={(num) => onSendMessage(`edit invoice ${num}`)}
                       onView={(num) => onSendMessage(`show invoice ${num}`)}
+                      onPay={(num) => onSendMessage(`pay invoice ${num}`)}
                     />
                   </div>
                 );

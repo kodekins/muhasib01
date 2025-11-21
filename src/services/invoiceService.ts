@@ -58,9 +58,9 @@ export interface InvoiceWithLines extends Invoice {
 
 export class InvoiceService {
   /**
-   * Calculate invoice totals from lines
+   * Calculate invoice totals from lines (line-level discount and tax only)
    */
-  static calculateTotals(lines: InvoiceLine[], discountAmount: number = 0): {
+  static calculateTotals(lines: InvoiceLine[]): {
     subtotal: number;
     tax_amount: number;
     total_amount: number;
@@ -78,7 +78,7 @@ export class InvoiceService {
       return sum + lineTax;
     }, 0);
 
-    const total_amount = subtotal + tax_amount - discountAmount;
+    const total_amount = subtotal + tax_amount; // No invoice-level discount
 
     return { subtotal, tax_amount, total_amount };
   }
@@ -204,7 +204,7 @@ export class InvoiceService {
       }
 
       // Calculate totals - use provided values if available, otherwise calculate
-      const calculatedTotals = this.calculateTotals(invoice.lines, invoice.discount_amount || 0);
+      const calculatedTotals = this.calculateTotals(invoice.lines);
       
       // Use provided values if they exist (from UI), otherwise use calculated
       const subtotal = invoice.subtotal !== undefined ? invoice.subtotal : calculatedTotals.subtotal;
@@ -340,7 +340,7 @@ export class InvoiceService {
       delete invoiceUpdates.customer;
 
       if (updates.lines) {
-        const totals = this.calculateTotals(updates.lines, updates.discount_amount || 0);
+        const totals = this.calculateTotals(updates.lines);
         invoiceUpdates = {
           ...invoiceUpdates,
           subtotal: totals.subtotal,
