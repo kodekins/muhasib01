@@ -791,7 +791,7 @@ export function BillManager() {
                         Approve
                       </Button>
                     )}
-                    {bill.balance_due > 0 && (bill.status === 'open' || bill.status === 'overdue') && (
+                    {bill.balance_due > 0 && bill.status !== 'draft' && bill.status !== 'pending' && bill.status !== 'void' && (
                       <Button size="sm" variant="outline" onClick={() => openPaymentDialog(bill)}>
                         <DollarSign className="h-4 w-4 mr-1" />
                         Pay Bill
