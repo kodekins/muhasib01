@@ -41,6 +41,7 @@ export function InvoiceManager() {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [customers, setCustomers] = useState<any[]>([]);
   const [accounts, setAccounts] = useState<any[]>([]);
+  const [bankAccounts, setBankAccounts] = useState<any[]>([]);
   const [products, setProducts] = useState<any[]>([]);
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isPaymentDialogOpen, setIsPaymentDialogOpen] = useState(false);
@@ -66,6 +67,7 @@ export function InvoiceManager() {
     amount: 0,
     payment_date: new Date().toISOString().split('T')[0],
     payment_method: 'bank_transfer',
+    bank_account_id: '',
     reference_number: '',
     notes: ''
   });
@@ -94,6 +96,7 @@ export function InvoiceManager() {
     fetchInvoices();
     fetchCustomers();
     fetchAccounts();
+    fetchBankAccounts();
     fetchProducts();
 
     // Real-time subscriptions
@@ -163,6 +166,25 @@ export function InvoiceManager() {
       setAccounts(data || []);
     } catch (error) {
       console.error('Error fetching accounts:', error);
+    }
+  };
+
+  const fetchBankAccounts = async () => {
+    try {
+      const { data: userData } = await supabase.auth.getUser();
+      if (!userData.user) return;
+
+      const { data } = await supabase
+        .from('accounts')
+        .select('id, name, code, account_type')
+        .eq('user_id', userData.user.id)
+        .eq('account_type', 'asset')
+        .eq('is_active', true)
+        .in('code', ['1010', '1011', '1020', '1021']) // Bank accounts and cash
+        .order('code');
+      setBankAccounts(data || []);
+    } catch (error) {
+      console.error('Error fetching bank accounts:', error);
     }
   };
 
@@ -384,6 +406,7 @@ export function InvoiceManager() {
       amount: invoice.balance_due,
       payment_date: new Date().toISOString().split('T')[0],
       payment_method: 'bank_transfer',
+      bank_account_id: '',
       reference_number: '',
       notes: ''
     });
@@ -401,6 +424,7 @@ export function InvoiceManager() {
           amount: payment.amount,
           payment_date: payment.payment_date,
           payment_method: payment.payment_method,
+          bank_account_id: payment.bank_account_id,
           reference_number: payment.reference_number,
           notes: payment.notes
         }
@@ -980,6 +1004,28 @@ export function InvoiceManager() {
                 </div>
 
                 <div>
+                  <Label>Deposit To Account *</Label>
+                  <Select 
+                    value={payment.bank_account_id} 
+                    onValueChange={(value) => setPayment(prev => ({ ...prev, bank_account_id: value }))}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select account" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {bankAccounts.map(account => (
+                        <SelectItem key={account.id} value={account.id}>
+                          {account.code} - {account.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Which account is receiving this payment?
+                  </p>
+                </div>
+
+                <div>
                   <Label>Reference Number</Label>
                   <Input
                     value={payment.reference_number}
@@ -999,7 +1045,7 @@ export function InvoiceManager() {
                 </div>
 
                 <div className="flex gap-2">
-                  <Button onClick={submitPayment} disabled={isLoading || payment.amount <= 0} className="flex-1">
+                  <Button onClick={submitPayment} disabled={isLoading || payment.amount <= 0 || !payment.bank_account_id} className="flex-1">
                     {isLoading ? 'Recording...' : 'Record Payment'}
                   </Button>
                   <Button onClick={() => setIsPaymentDialogOpen(false)} variant="outline">
