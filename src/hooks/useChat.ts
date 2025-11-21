@@ -8,6 +8,8 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
   created_at: string;
+  message_type?: string;
+  metadata?: any;
 }
 
 interface Conversation {
@@ -118,7 +120,7 @@ export function useChat() {
     }
   };
 
-  const sendMessage = async (content: string) => {
+  const sendMessage = async (content: string, options?: { model?: string }) => {
     try {
       setIsLoading(true);
       
@@ -135,7 +137,8 @@ export function useChat() {
         .insert([{
           conversation_id: conversationId,
           role: 'user',
-          content
+          content,
+          message_type: 'text'
         }])
         .select()
         .single();
@@ -146,16 +149,32 @@ export function useChat() {
       setMessages(prev => [...prev, userMessage as Message]);
 
       // Generate AI response based on message content
-      const aiResponse = await generateAIResponse(content, conversationId);
+      const aiResponseData = await generateAIResponse(content, conversationId, [], options?.model);
 
-      // Add AI message
+      // Handle different response types
+      let aiMessageData: any = {
+        conversation_id: conversationId,
+        role: 'assistant',
+        content: aiResponseData.response,
+        message_type: aiResponseData.type || 'text'
+      };
+
+      // Add metadata for preview messages
+      if (aiResponseData.type === 'preview') {
+        aiMessageData.metadata = {
+          action: aiResponseData.action,
+          data: aiResponseData.data
+        };
+      } else if (aiResponseData.type === 'success' && aiResponseData.data) {
+        aiMessageData.metadata = {
+          data: aiResponseData.data
+        };
+      }
+
+      // Add AI message to database
       const { data: aiMessage, error: aiMessageError } = await supabase
         .from('messages')
-        .insert([{
-          conversation_id: conversationId,
-          role: 'assistant',
-          content: aiResponse
-        }])
+        .insert([aiMessageData])
         .select()
         .single();
 
@@ -182,7 +201,7 @@ export function useChat() {
     }
   };
 
-  const generateAIResponse = async (userMessage: string, conversationId: string, attachments?: any[]): Promise<string> => {
+  const generateAIResponse = async (userMessage: string, conversationId: string, attachments?: any[], model?: string): Promise<any> => {
     try {
       const { data: userData } = await supabase.auth.getUser();
       if (!userData.user) throw new Error('Not authenticated');
@@ -192,19 +211,30 @@ export function useChat() {
           message: userMessage,
           conversationId: conversationId,
           userId: userData.user.id,
-          attachments: attachments || []
+          attachments: attachments || [],
+          model: model || 'meta-llama/llama-3.2-3b-instruct:free'
         }
       });
 
       if (error) {
         console.error('AI function error:', error);
-        return "I apologize, but I'm having trouble processing your request right now. Please try again.";
+        return {
+          type: 'text',
+          response: "I apologize, but I'm having trouble processing your request right now. Please try again."
+        };
       }
 
-      return data.response || "I apologize, but I couldn't generate a response. Please try again.";
+      // Return the full response object which includes type, response, and optional data
+      return data || {
+        type: 'text',
+        response: "I apologize, but I couldn't generate a response. Please try again."
+      };
     } catch (error) {
       console.error('Error calling AI function:', error);
-      return "I'm currently experiencing technical difficulties. Please try again in a moment.";
+      return {
+        type: 'text',
+        response: "I'm currently experiencing technical difficulties. Please try again in a moment."
+      };
     }
   };
 

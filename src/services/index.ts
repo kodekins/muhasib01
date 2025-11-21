@@ -31,6 +31,9 @@ export * from './creditMemoService';
 // AI Assistant Service
 export * from './aiAssistantService';
 
+// Import Service
+export * from './importService';
+
 // Utilities
 export * from './utils/timestamp';
 
@@ -56,4 +59,5 @@ export { TransactionIntegrationService } from './transactionIntegrationService';
 export { ExportService } from './exportService';
 export { AIAssistantService } from './aiAssistantService';
 export { CreditMemoService } from './creditMemoService';
+export { ImportService } from './importService';
 export { withTimestamp, withTimestamps } from './utils/timestamp';

@@ -1,24 +1,11 @@
 /**
- * MUHASIB AI Accountant - Edge Function
+ * MUHASIB AI Accountant - Enhanced Edge Function with Conversation Memory
  * 
- * This is the AI-powered accounting assistant that handles:
- * - Natural language processing for accounting commands
- * - Invoice and bill management
- * - Customer and vendor operations
- * - Product and inventory management
- * - Financial reporting and analysis
- * - Budget tracking
- * - Transaction recording
- * 
- * The AI can execute actions directly in the database and provides
- * intelligent responses for all accounting operations.
- * 
- * Fixed issues:
- * - Syntax error in OPTIONS handler (missing opening brace)
- * - Added proper error handling for API calls
- * - Added validation for OpenRouter API key
- * - Enhanced with comprehensive operation support
- * - Better type safety and response handling
+ * Features:
+ * - Multi-turn conversations with memory
+ * - Collects missing information step by step
+ * - Shows preview before creating records
+ * - Requires confirmation before execution
  */
 
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
@@ -37,372 +24,183 @@ const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
 serve(async (req) => {
-  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    // Validate OpenRouter API key
     if (!openRouterApiKey) {
-      console.error('OPENROUTER_API_KEY is not set');
-      return new Response(JSON.stringify({ 
-        error: 'AI service not configured',
-        response: "I apologize, but the AI service is not properly configured. Please contact support."
-      }), {
-        status: 500,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+      throw new Error('AI service not configured');
     }
 
-    const { message, conversationId, userId, attachments } = await req.json();
+    const { message, conversationId, userId, model } = await req.json();
     
-    // Validate required fields
-    if (!message || !userId) {
-      return new Response(JSON.stringify({ 
-        error: 'Missing required fields',
-        response: "Invalid request. Please provide message and userId."
-      }), {
-        status: 400,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+    if (!message || !userId || !conversationId) {
+      throw new Error('Missing required fields: message, userId, and conversationId');
     }
     
-    console.log('AI Accountant request:', { message, conversationId, userId, attachments });
-
-    let context = '';
-    let extractedData = null;
-
-    // Process attachments if provided
-    if (attachments && attachments.length > 0) {
-      console.log('Processing attachments:', attachments.length);
-      extractedData = await processAttachments(attachments, userId);
-      context = `\n\nAttachment Analysis:\n${JSON.stringify(extractedData, null, 2)}`;
-    }
-
-    // Get user's recent transactions and accounts for context
-    const { data: accounts } = await supabase
-      .from('accounts')
-      .select('*')
-      .eq('user_id', userId)
-      .limit(10);
-
-    const { data: categories } = await supabase
-      .from('categories')
-      .select('*')
-      .eq('user_id', userId)
-      .limit(10);
-
-    const { data: customers } = await supabase
-      .from('customers')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('is_active', true)
-      .limit(10);
-
-    const { data: vendors } = await supabase
-      .from('vendors')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('is_active', true)
-      .limit(10);
-
-    const { data: recentTransactions } = await supabase
-      .from('transactions')
-      .select('*, accounts(name), categories(name), customers(name), vendors(name)')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false })
-      .limit(5);
-
-    const { data: products } = await supabase
-      .from('products')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('is_active', true)
-      .limit(10);
-
-    const { data: recentInvoices } = await supabase
-      .from('invoices')
-      .select('*, customer:customers(name)')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false })
-      .limit(3);
-
-    const { data: recentBills } = await supabase
-      .from('bills')
-      .select('*, vendor:vendors(name)')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false })
-      .limit(3);
-
-    const systemPrompt = `You are MUHASIB AI Accounting Assistant - A professional AI accountant with FULL BOOKKEEPING capabilities. You understand double-entry accounting, manage complete business finances, and help with invoicing, bills, inventory, and financial reporting.
-
-# User's Current Data
-Accounts: ${accounts && accounts.length > 0 ? JSON.stringify(accounts.map(a => ({ id: a.id, name: a.name, type: a.account_type, code: a.code }))) : '[]'}
-Categories: ${categories && categories.length > 0 ? JSON.stringify(categories.map(c => ({ id: c.id, name: c.name, color: c.color }))) : '[]'}
-Customers: ${customers && customers.length > 0 ? JSON.stringify(customers.map(c => ({ id: c.id, name: c.name, company_name: c.company_name, email: c.email }))) : '[]'}
-Vendors: ${vendors && vendors.length > 0 ? JSON.stringify(vendors.map(v => ({ id: v.id, name: v.name, company_name: v.company_name, email: v.email }))) : '[]'}
-Products: ${products && products.length > 0 ? JSON.stringify(products.map(p => ({ id: p.id, name: p.name, type: p.type, unit_price: p.unit_price, quantity_on_hand: p.quantity_on_hand }))) : '[]'}
-Recent Transactions: ${recentTransactions && recentTransactions.length > 0 ? JSON.stringify(recentTransactions.slice(0, 3)) : '[]'}
-Recent Invoices: ${recentInvoices && recentInvoices.length > 0 ? JSON.stringify(recentInvoices) : '[]'}
-Recent Bills: ${recentBills && recentBills.length > 0 ? JSON.stringify(recentBills) : '[]'}
-
-# IMPORTANT RULES:
-1. ONLY use customer IDs from the list above - DO NOT make up fake UUIDs
-2. ONLY use vendor IDs from the list above - DO NOT make up fake UUIDs
-3. If a customer/vendor doesn't exist, you MUST create them FIRST using CREATE_CUSTOMER or CREATE_VENDOR
-4. If user mentions a customer/vendor not in the list, CREATE them first, then use their ID
-5. NEVER hallucinate or invent data that doesn't exist in the user's database
-6. If lists are empty [], tell the user they need to set up data first or offer to create it
-
-${context}
-
-# CRITICAL ACCOUNTING RULES
-1. EXPENSES: Money OUT (payments, purchases) → NEGATIVE amounts, EXPENSE accounts
-2. INCOME/REVENUE: Money IN (sales, payments received) → POSITIVE amounts, REVENUE accounts
-3. INVOICES: Bills TO customers (they owe you) → Creates Accounts Receivable
-4. BILLS: Bills FROM vendors (you owe them) → Creates Accounts Payable
-
-# Account Types
-- asset: Cash, Bank Account, Accounts Receivable (AR)
-- liability: Accounts Payable (AP), Loans
-- equity: Owner Equity, Retained Earnings
-- revenue: Sales, Service Revenue (INCOME - positive)
-- expense: Operating Expenses, Supplies, Travel (EXPENSES - negative)
-
-# FULL CAPABILITIES
-
-## 📊 Sales & Invoicing
-- CREATE_INVOICE: Generate invoices for customers with line items
-- CREATE_ESTIMATE: Create quotes/estimates that convert to invoices
-- RECORD_INVOICE_PAYMENT: Record payment received from customer
-- SEND_INVOICE: Mark invoice as sent to customer
-
-## 📄 Purchases & Bills
-- CREATE_BILL: Enter vendor bills with line items
-- APPROVE_BILL: Approve bill for payment
-- RECORD_BILL_PAYMENT: Record payment made to vendor
-- GET_BILLS_DUE: Show bills due soon
-
-## 📦 Products & Inventory
-- CREATE_PRODUCT: Add products/services to catalog
-- UPDATE_PRODUCT: Update product details and pricing
-- UPDATE_INVENTORY: Adjust inventory quantities
-- GET_LOW_STOCK: Show products low on stock
-- GET_PRODUCT_LIST: List all products/services
-
-## 💰 Transactions & Entries
-- CREATE_TRANSACTION: Record simple transactions
-- CREATE_JOURNAL_ENTRY: Manual double-entry bookkeeping
-- UPDATE_TRANSACTION: Modify existing transactions
-
-## 👥 Relationships
-- CREATE_CUSTOMER: Add customers/clients
-- CREATE_VENDOR: Add vendors/suppliers
-- CREATE_BUDGET: Set spending budgets
-- CREATE_CATEGORY: Add transaction categories
-
-## 📈 Reports & Analysis
-- GET_FINANCIAL_SUMMARY: P&L, Balance Sheet, Cash Flow
-- GET_PROFIT_LOSS: Detailed P&L report
-- GET_AGING_REPORT: AR/AP aging (overdue invoices/bills)
-- GET_BUDGET_STATUS: Budget vs actual spending
-- GET_FINANCIAL_HEALTH: AI-powered financial health score
-- ANALYZE_SPENDING: Spending analysis and insights
-
-# ACTION FORMAT
-Respond with JSON for actions:
-{
-  "action": "ACTION_TYPE",
-  "data": { /* action-specific data */ },
-  "response": "Human readable confirmation message"
-}
-
-# ACTION SPECIFICATIONS
-
-CREATE_INVOICE:
-{
-  "customer_id": "uuid",
-  "invoice_date": "YYYY-MM-DD",
-  "due_date": "YYYY-MM-DD",
-  "lines": [
-    {
-      "description": "Service/Product description",
-      "quantity": 1,
-      "unit_price": 100.00,
-      "amount": 100.00
-    }
-  ],
-  "notes": "Optional invoice notes"
-}
-
-CREATE_BILL:
-{
-  "vendor_id": "uuid",
-  "bill_date": "YYYY-MM-DD",
-  "due_date": "YYYY-MM-DD",
-  "lines": [
-    {
-      "description": "Item description",
-      "quantity": 1,
-      "unit_price": 50.00,
-      "amount": 50.00
-    }
-  ]
-}
-
-CREATE_PRODUCT:
-{
-  "name": "Product Name",
-  "type": "product|service|inventory",
-  "unit_price": 99.99,
-  "cost": 50.00,
-  "track_inventory": true/false,
-  "quantity_on_hand": 100
-}
-
-RECORD_INVOICE_PAYMENT:
-{
-  "invoice_id": "uuid",
-  "amount": 500.00,
-  "payment_date": "YYYY-MM-DD",
-  "payment_method": "cash|check|credit_card|bank_transfer"
-}
-
-GET_PROFIT_LOSS:
-{
-  "start_date": "YYYY-MM-DD",
-  "end_date": "YYYY-MM-DD"
-}
-
-UPDATE_INVENTORY:
-{
-  "product_id": "uuid",
-  "quantity": 10,
-  "adjustment_type": "set|add|subtract"
-}
-
-CREATE_CUSTOMER:
-{
-  "name": "Customer Name",
-  "email": "email@example.com",
-  "phone": "+1234567890",
-  "company_name": "Company Name",
-  "customer_type": "customer"
-}
-
-CREATE_VENDOR:
-{
-  "name": "Vendor Name",
-  "email": "vendor@example.com",
-  "phone": "+1234567890",
-  "company_name": "Company Name",
-  "vendor_type": "vendor"
-}
-
-# WORKFLOW EXAMPLES
-
-## When Customer/Vendor Exists:
-User: "Create an invoice for ABC Corp for $1,500"
-→ Check if "ABC Corp" exists in Customers list
-→ If YES: CREATE_INVOICE with existing customer_id
-→ If NO: First respond "I need to create ABC Corp as a customer. CREATE_CUSTOMER", then CREATE_INVOICE
-
-## When Database is Empty:
-User: "Create an invoice for ABC Corp for $1,500"
-You respond: "I don't see ABC Corp in your customers yet. Let me create them first."
-→ CREATE_CUSTOMER (name: "ABC Corp")
-→ Then inform user: "I've created ABC Corp. To create the invoice, I'll need them saved first. Please ask again."
-
-## When User Wants Reports with No Data:
-User: "Show me my P&L"
-→ If no transactions exist, respond: "You don't have any transactions yet. Would you like me to help you record some income or expenses?"
-
-## Sequential Actions:
-User: "Create an invoice for New Client for $500"
-Step 1: Respond "I'll create New Client first" (conversationally, not JSON)
-Step 2: Tell them to create customer first OR ask for more details
-
-# GOLDEN RULE
-- If customer/vendor name not in current list → Tell user to add them first
-- Don't create invoices/bills for non-existent entities
-- Offer to help create the entity first
-
-If you need more info or cannot perform action, respond conversationally without JSON structure.`;
-
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${openRouterApiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://tgshonwmthturuxeceqr.supabase.co',
-        'X-Title': 'MUHASIB AI Accountant',
-      },
-      body: JSON.stringify({
-        model: 'google/gemma-2-9b-it:free',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: message }
-        ],
-        temperature: 0.7,
-        max_tokens: 2000,
-      }),
+    // Use provided model or default
+    const selectedModel = model || 'meta-llama/llama-3.2-3b-instruct:free';
+    
+    console.log('AI Request:', { 
+      message: message.substring(0, 100), 
+      conversationId, 
+      userId,
+      model: selectedModel 
     });
 
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      console.error('OpenRouter API error:', errorData);
-      throw new Error(`AI service error: ${errorData.error?.message || response.statusText}`);
-    }
-
-    const aiData = await response.json();
+    // Check if user is confirming a preview
+    const isConfirmation = message.toLowerCase().match(/^(confirm|yes|create|proceed|ok|approve)$/i);
+    const isCancel = message.toLowerCase().match(/^(cancel|no|stop|abort)$/i);
     
-    if (!aiData.choices || !aiData.choices[0] || !aiData.choices[0].message) {
-      console.error('Invalid AI response structure:', aiData);
-      throw new Error('Invalid response from AI service');
-    }
+    // Load conversation context
+    const context = await loadConversationContext(conversationId, userId);
     
-    const aiResponse = aiData.choices[0].message.content;
-
-    console.log('AI Response:', aiResponse);
-
-    // Try to parse as JSON to see if it's an action
-    let actionResult: { action: string; response: string } | null = null;
-    try {
-      // Clean the response by removing markdown code blocks if present
-      let cleanResponse = aiResponse.trim();
-      if (cleanResponse.startsWith('```json')) {
-        cleanResponse = cleanResponse.replace(/```json\n?/g, '').replace(/\n?```$/g, '');
-      } else if (cleanResponse.startsWith('```')) {
-        cleanResponse = cleanResponse.replace(/```\n?/g, '').replace(/\n?```$/g, '');
-      }
+    // Handle confirmation
+    if (isConfirmation && context && context.state === 'preview') {
+      console.log('Executing confirmed action:', context.pending_action);
+      const result = await executeAction(context.pending_action, context.collected_data, userId);
+      await clearConversationContext(conversationId);
       
-      const parsedResponse = JSON.parse(cleanResponse);
-      if (parsedResponse.action) {
-        console.log('Performing action:', parsedResponse.action);
-        actionResult = await performAction(parsedResponse, userId);
-        console.log('Action result:', actionResult);
-      }
-    } catch (error) {
-      console.log('Not a JSON action, treating as regular response:', error.message);
-      // Not a JSON action, just a regular response
+      return new Response(JSON.stringify({ 
+        type: 'success',
+        response: result.response,
+        data: result.data
+      }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
     }
 
-    const finalResponse = actionResult ? actionResult.response : aiResponse;
+    // Handle cancellation
+    if (isCancel && context) {
+      await clearConversationContext(conversationId);
+      return new Response(JSON.stringify({
+        type: 'message',
+        response: "Okay, I've cancelled that. What would you like to do instead?"
+      }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
 
-    return new Response(JSON.stringify({ 
-      response: finalResponse,
-      actionPerformed: !!actionResult,
-      actionType: actionResult?.action
+    // Load user data for context
+    const userData = await loadUserData(userId);
+    
+    // Load recent messages for conversation history
+    const messageHistory = await loadRecentMessages(conversationId);
+    
+    // Build system prompt
+    const systemPrompt = buildSystemPrompt(userData, context, messageHistory);
+    
+    // Call AI with selected model
+    const aiResponse = await callOpenRouter(systemPrompt, message, selectedModel);
+    
+    // Parse AI response
+    const parsed = parseAIResponse(aiResponse);
+    console.log('Parsed AI Response:', JSON.stringify(parsed, null, 2));
+    
+    // Handle based on mode
+    if (parsed.mode === 'collecting') {
+      // Save partial data
+      await updateConversationContext(conversationId, userId, {
+        pending_action: parsed.action,
+        collected_data: parsed.collected,
+        missing_fields: parsed.missing,
+        state: 'collecting'
+      });
+      
+      return new Response(JSON.stringify({ 
+        type: 'message',
+        response: parsed.response
+      }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+    
+    if (parsed.mode === 'preview') {
+      // For EDIT_INVOICE, if only invoice_number/id provided, load full invoice data
+      if (parsed.action === 'EDIT_INVOICE' && parsed.preview_data && 
+          (parsed.preview_data.invoice_number || parsed.preview_data.invoice_id) &&
+          !parsed.preview_data.lines) {
+        
+        // Load full invoice data
+        let query = supabase
+          .from('invoices')
+          .select('*, customer:customers(name), lines:invoice_lines(*)')
+          .eq('user_id', userId);
+
+        if (parsed.preview_data.invoice_id) {
+          query = query.eq('id', parsed.preview_data.invoice_id);
+        } else if (parsed.preview_data.invoice_number) {
+          query = query.eq('invoice_number', parsed.preview_data.invoice_number);
+        }
+
+        const { data: invoice } = await query.single();
+
+        if (invoice) {
+          // Build full preview data
+          parsed.preview_data = {
+            invoice_id: invoice.id,
+            invoice_number: invoice.invoice_number,
+            customer_id: invoice.customer_id,
+            customer_name: invoice.customer?.name,
+            invoice_date: invoice.invoice_date,
+            due_date: invoice.due_date,
+            lines: invoice.lines.sort((a: any, b: any) => a.line_order - b.line_order),
+            subtotal: invoice.subtotal,
+            tax_amount: invoice.tax_amount || 0,
+            discount_amount: invoice.discount_amount || 0,
+            total_amount: invoice.total_amount,
+            notes: invoice.notes || ''
+          };
+        }
+      }
+
+      // Save preview data
+      await updateConversationContext(conversationId, userId, {
+        pending_action: parsed.action,
+        collected_data: parsed.preview_data,
+        missing_fields: [],
+        state: 'preview'
+      });
+      
+      return new Response(JSON.stringify({
+        type: 'preview',
+        action: parsed.action,
+        data: parsed.preview_data,
+        response: parsed.response
+      }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+    
+    if (parsed.mode === 'execute') {
+      // Direct execution (user provided all info)
+      const result = await executeAction(parsed.action, parsed.data, userId);
+      await clearConversationContext(conversationId);
+      
+      return new Response(JSON.stringify({
+        type: 'success',
+        response: result.response,
+        data: result.data
+      }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+    
+    // Default: just a conversational response
+    return new Response(JSON.stringify({
+      type: 'message',
+      response: aiResponse
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
 
   } catch (error) {
-    console.error('Error in ai-accountant function:', error);
+    console.error('Error in ai-accountant:', error);
     return new Response(JSON.stringify({ 
+      type: 'error',
       error: error.message,
-      response: "I apologize, but I encountered an error processing your request. Please try again."
+      response: "I apologize, but I encountered an error. Please try again."
     }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -410,214 +208,353 @@ If you need more info or cannot perform action, respond conversationally without
   }
 });
 
-async function processAttachments(attachments: any[], userId: string) {
-  // For now, return placeholder data. In a full implementation, 
-  // this would use OCR/document parsing to extract transaction data
-  console.log('Processing attachments for user:', userId);
+// Helper Functions
+
+async function loadConversationContext(conversationId: string, userId: string) {
+  const { data, error } = await supabase
+    .from('conversation_context')
+      .select('*')
+    .eq('conversation_id', conversationId)
+      .eq('user_id', userId)
+    .single();
+    
+  if (error && error.code !== 'PGRST116') { // PGRST116 = no rows returned
+    console.error('Error loading context:', error);
+  }
   
-  // Placeholder for attachment processing
+  return data;
+}
+
+async function updateConversationContext(conversationId: string, userId: string, updates: any) {
+  const { error } = await supabase
+    .from('conversation_context')
+    .upsert({
+      conversation_id: conversationId,
+      user_id: userId,
+      ...updates,
+      updated_at: new Date().toISOString()
+    }, {
+      onConflict: 'conversation_id'
+    });
+    
+  if (error) {
+    console.error('Error updating context:', error);
+  }
+}
+
+async function clearConversationContext(conversationId: string) {
+  const { error } = await supabase
+    .from('conversation_context')
+    .delete()
+    .eq('conversation_id', conversationId);
+    
+  if (error) {
+    console.error('Error clearing context:', error);
+  }
+}
+
+async function loadRecentMessages(conversationId: string) {
+  const { data } = await supabase
+    .from('messages')
+    .select('role, content')
+    .eq('conversation_id', conversationId)
+    .order('created_at', { ascending: false })
+    .limit(6);
+    
+  return (data || []).reverse();
+}
+
+async function loadUserData(userId: string) {
+  const [accounts, customers, products] = await Promise.all([
+    supabase.from('accounts').select('id, name, account_type, code').eq('user_id', userId).limit(10),
+    supabase.from('customers').select('id, name, company_name, email').eq('user_id', userId).eq('is_active', true).limit(10),
+    supabase.from('products').select('id, name, type, unit_price').eq('user_id', userId).eq('is_active', true).limit(10),
+  ]);
+  
   return {
-    detected_transactions: [
-      {
-        amount: 150.00,
-        description: "Office supplies from receipt",
-        vendor: "Office Depot",
-        date: new Date().toISOString().split('T')[0]
-      }
-    ]
+    accounts: accounts.data || [],
+    customers: customers.data || [],
+    products: products.data || []
   };
 }
 
-async function performAction(parsedResponse: any, userId: string) {
-  const { action, data } = parsedResponse;
+function buildSystemPrompt(userData: any, context: any, messageHistory: any[]) {
+  const historyText = messageHistory.map(m => `${m.role}: ${m.content}`).join('\n');
   
-  console.log('Performing action:', action, data);
+  const contextInfo = context ? `
+# ACTIVE CONVERSATION CONTEXT
+You are currently ${context.state === 'collecting' ? 'collecting information for' : 'showing preview for'}: ${context.pending_action}
+Collected data so far: ${JSON.stringify(context.collected_data)}
+Missing fields: ${context.missing_fields?.join(', ') || 'none'}
+` : '';
 
+  return `You are MUHASIB AI - An intelligent conversational accountant with MEMORY.
+
+# CORE BEHAVIOR - MULTI-TURN CONVERSATIONS
+You can have CONVERSATIONS with users. When creating invoices:
+
+1. **COLLECTING MODE**: If user gives INCOMPLETE information
+   - Acknowledge what you received
+   - Ask for ONE or TWO missing fields (don't overwhelm)
+   - Be conversational and friendly
+   - REMEMBER previous messages
+   
+   Response format (JSON):
+   {
+     "mode": "collecting",
+     "action": "CREATE_INVOICE",
+     "collected": { "customer_id": "uuid", "amount": 500 },
+     "missing": ["invoice_date", "due_date"],
+     "response": "Great! I'll create an invoice for $500. When should it be dated and when is it due?"
+   }
+
+2. **PREVIEW MODE**: When you have ALL required fields
+   - Show formatted preview
+   - Ask for confirmation
+   - User can edit or confirm
+   
+   Response format (JSON):
+   {
+     "mode": "preview",
+     "action": "CREATE_INVOICE",
+     "preview_data": {
+       "customer_id": "uuid",
+       "customer_name": "John Doe",
+       "invoice_date": "2025-01-22",
+       "due_date": "2025-02-21",
+       "lines": [{"description": "Consulting", "quantity": 1, "unit_price": 500, "amount": 500}],
+       "subtotal": 500,
+       "tax_amount": 0,
+       "total_amount": 500
+     },
+     "response": "Here's your invoice preview:\\n\\nCustomer: John Doe\\nDate: Jan 22, 2025\\nDue: Feb 21, 2025\\nAmount: $500.00 for Consulting\\nTotal: $500.00\\n\\nType 'confirm' to create this invoice."
+   }
+
+3. **EXECUTE MODE**: Only if user provides EVERYTHING upfront
+   Same as preview but mode is "execute"
+
+# INVOICE REQUIREMENTS
+
+## Creating Invoices (CREATE_INVOICE)
+Required fields:
+- customer_id (must exist in customers list)
+- invoice_date (format: YYYY-MM-DD)
+- due_date (format: YYYY-MM-DD)
+- lines: [{ description, quantity, unit_price, amount }]
+
+Optional: tax_amount, discount_amount, notes
+
+## Sending Invoices (SEND_INVOICE)
+When user says "send invoice INV-001" or "mark invoice as sent":
+{
+  "mode": "execute",
+  "action": "SEND_INVOICE",
+  "data": {
+    "invoice_number": "INV-001"
+  }
+}
+
+## Listing Invoices (LIST_INVOICES)
+When user asks "show my invoices" or "list draft invoices":
+{
+  "mode": "execute",
+  "action": "LIST_INVOICES",
+  "data": {
+    "status": "draft", // optional: draft, sent, paid, overdue, void, or omit for all
+    "customer_id": "uuid", // optional: filter by customer
+    "customer_name": "ABC Corp" // optional: filter by customer name
+  }
+}
+
+## Getting Invoice Details (GET_INVOICE)
+When user asks "show invoice INV-001" or "get invoice details":
+{
+  "mode": "execute",
+  "action": "GET_INVOICE",
+  "data": {
+    "invoice_number": "INV-001" // or "invoice_id": "uuid"
+  }
+}
+
+## Editing Invoices (EDIT_INVOICE)
+When user wants to edit an invoice, use preview mode similar to creation:
+{
+  "mode": "preview",
+  "action": "EDIT_INVOICE",
+  "preview_data": {
+    "invoice_id": "uuid",
+    "invoice_number": "INV-001",
+    "customer_id": "uuid",
+    "customer_name": "John Doe",
+    "invoice_date": "2025-01-22",
+    "due_date": "2025-02-21",
+    "lines": [...],
+    "subtotal": 500,
+    "tax_amount": 0,
+    "total_amount": 500,
+    "notes": "..."
+  },
+  "response": "Here's the invoice to edit. Make your changes and confirm."
+}
+
+# EXAMPLE CONVERSATIONS
+
+User: "Send invoice INV-001"
+You: {"mode":"execute","action":"SEND_INVOICE","data":{"invoice_number":"INV-001"}}
+
+User: "Show my draft invoices"
+You: {"mode":"execute","action":"LIST_INVOICES","data":{"status":"draft"}}
+
+User: "Show invoices for ABC Corp"
+You: {"mode":"execute","action":"LIST_INVOICES","data":{"customer_name":"ABC Corp"}}
+
+User: "Edit invoice INV-002"
+You: {"mode":"preview","action":"EDIT_INVOICE","preview_data":{...full invoice data...}}
+
+User: "What are the details of invoice INV-002?"
+You: {"mode":"execute","action":"GET_INVOICE","data":{"invoice_number":"INV-002"}}
+
+${contextInfo}
+
+# USER'S DATA
+Customers: ${JSON.stringify(userData.customers)}
+Products: ${JSON.stringify(userData.products)}
+Accounts: ${JSON.stringify(userData.accounts.map((a: any) => ({ id: a.id, name: a.name })))}
+
+# RECENT CONVERSATION
+${historyText}
+
+# IMPORTANT RULES
+- ALWAYS return valid JSON for invoice operations
+- NEVER make up customer IDs - only use IDs from the list above
+- If customer doesn't exist, ask user to create them first
+- For dates: accept "today", "tomorrow", or specific dates
+- Default due date: 30 days from invoice date if not specified
+- Be conversational but return structured JSON
+- REMEMBER what user told you in previous messages
+
+# EXAMPLE CONVERSATIONS
+
+User: "Create invoice for John"
+You: {"mode":"collecting","action":"CREATE_INVOICE","collected":{"customer_id":"uuid-john"},"missing":["amount","invoice_date","due_date"],"response":"I'll create an invoice for John. What's the amount or what items should I include?"}
+
+User: "$500 for consulting"
+You: {"mode":"collecting","action":"CREATE_INVOICE","collected":{"customer_id":"uuid-john","lines":[{...}],"subtotal":500},"missing":["invoice_date","due_date"],"response":"Perfect! $500 for consulting. When should the invoice be dated and when is payment due?"}
+
+User: "Today and due in 30 days"
+You: {"mode":"preview","action":"CREATE_INVOICE","preview_data":{...},"response":"Here's your invoice preview..."}`;
+}
+
+async function callOpenRouter(systemPrompt: string, userMessage: string, model: string = 'meta-llama/llama-3.2-3b-instruct:free') {
+  console.log('Using AI model:', model);
+  
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${openRouterApiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': supabaseUrl,
+      'X-Title': 'MUHASIB AI Accountant',
+    },
+    body: JSON.stringify({
+      model: model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userMessage }
+      ],
+      temperature: 0.7,
+      max_tokens: 2000,
+    }),
+  });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+    console.error('OpenRouter error:', errorData);
+      throw new Error(`AI service error: ${errorData.error?.message || response.statusText}`);
+    }
+
+  const data = await response.json();
+  return data.choices[0].message.content;
+}
+
+function parseAIResponse(aiResponse: string) {
   try {
-    switch (action) {
-      case 'CREATE_TRANSACTION':
-        console.log('Creating transaction with data:', data);
-        const { data: transaction, error: transactionError } = await supabase
-          .from('transactions')
-          .insert([{
-            user_id: userId,
-            amount: data.amount,
-            description: data.description,
-            account_id: data.account_id,
-            category_id: data.category_id,
-            customer_id: data.customer_id || null,
-            vendor_id: data.vendor_id || null,
-            transaction_date: data.transaction_date || new Date().toISOString().split('T')[0],
-            notes: data.notes || '',
-            status: 'cleared'
-          }])
-          .select()
-          .single();
+    // Clean markdown code blocks if present
+      let cleanResponse = aiResponse.trim();
+      if (cleanResponse.startsWith('```json')) {
+        cleanResponse = cleanResponse.replace(/```json\n?/g, '').replace(/\n?```$/g, '');
+      } else if (cleanResponse.startsWith('```')) {
+        cleanResponse = cleanResponse.replace(/```\n?/g, '').replace(/\n?```$/g, '');
+      }
+      
+    const parsed = JSON.parse(cleanResponse);
+    
+    // Validate structure
+    if (parsed.mode && parsed.action) {
+      return parsed;
+    }
+    
+    // If not structured, return as conversational
+    return { mode: 'conversation', response: aiResponse };
+  } catch (error) {
+    console.log('Not JSON, treating as conversation:', error.message);
+    return { mode: 'conversation', response: aiResponse };
+  }
+}
 
-        if (transactionError) {
-          console.error('Transaction creation error:', transactionError);
-          throw transactionError;
-        }
-        
-        console.log('Transaction created successfully:', transaction);
-        
-        return {
-          action: 'CREATE_TRANSACTION',
-          response: `✅ Transaction recorded successfully! Added ${data.amount > 0 ? 'income' : 'expense'} of $${Math.abs(data.amount)} for "${data.description}".`
-        };
-
-      case 'UPDATE_TRANSACTION':
-        console.log('Updating transaction with data:', data);
-        const { data: updatedTransaction, error: updateError } = await supabase
-          .from('transactions')
-          .update({
-            amount: data.amount,
-            description: data.description,
-            account_id: data.account_id,
-            category_id: data.category_id,
-            customer_id: data.customer_id || null,
-            vendor_id: data.vendor_id || null,
-            transaction_date: data.transaction_date,
-            notes: data.notes || ''
-          })
-          .eq('id', data.id)
+async function executeAction(action: string, data: any, userId: string) {
+  console.log('Executing action:', action, data);
+  
+  if (action === 'CREATE_INVOICE') {
+    // Generate invoice number
+    const { data: lastInvoice } = await supabase
+      .from('invoices')
+      .select('invoice_number')
           .eq('user_id', userId)
-          .select()
+      .order('created_at', { ascending: false })
+      .limit(1)
           .single();
 
-        if (updateError) {
-          console.error('Transaction update error:', updateError);
-          throw updateError;
-        }
-        
-        console.log('Transaction updated successfully:', updatedTransaction);
-        
-        return {
-          action: 'UPDATE_TRANSACTION',
-          response: `✅ Transaction updated successfully! Modified ${data.amount > 0 ? 'income' : 'expense'} of $${Math.abs(data.amount)} for "${data.description}".`
-        };
-
-      case 'CREATE_BUDGET':
-        const { data: budget, error: budgetError } = await supabase
-          .from('budgets')
-          .insert([{
-            user_id: userId,
-            name: data.name,
-            amount: data.amount,
-            budget_type: data.budget_type,
-            category_id: data.category_id,
-            start_date: data.start_date,
-            end_date: data.end_date
-          }])
-          .select()
-          .single();
-
-        if (budgetError) throw budgetError;
-
-        return {
-          action: 'CREATE_BUDGET',
-          response: `✅ Budget "${data.name}" created successfully! Set limit of $${data.amount} for ${data.budget_type} period.`
-        };
-
-      case 'CREATE_CATEGORY':
-        const { data: category, error: categoryError } = await supabase
-          .from('categories')
-          .insert([{
-            user_id: userId,
-            name: data.name,
-            description: data.description,
-            color: data.color || '#6366f1'
-          }])
-          .select()
-          .single();
-
-        if (categoryError) throw categoryError;
-
-        return {
-          action: 'CREATE_CATEGORY',
-          response: `✅ Category "${data.name}" created successfully!`
-        };
-
-
-      case 'CREATE_CUSTOMER':
-        const { data: customer, error: customerError } = await supabase
-          .from('customers')
-          .insert([{
-            user_id: userId,
-            name: data.name,
-            email: data.email || null,
-            phone: data.phone || null,
-            company_name: data.company_name || null,
-            customer_type: data.customer_type || 'customer'
-          }])
-          .select()
-          .single();
-
-        if (customerError) throw customerError;
-
-        return {
-          action: 'CREATE_CUSTOMER',
-          response: `✅ Customer "${data.name}" created successfully!`
-        };
-
-      case 'CREATE_VENDOR':
-        const { data: vendor, error: vendorError } = await supabase
-          .from('vendors')
-          .insert([{
-            user_id: userId,
-            name: data.name,
-            email: data.email || null,
-            phone: data.phone || null,
-            company_name: data.company_name || null,
-            vendor_type: data.vendor_type || 'vendor'
-          }])
-          .select()
-          .single();
-
-        if (vendorError) throw vendorError;
-
-        return {
-          action: 'CREATE_VENDOR',
-          response: `✅ Vendor "${data.name}" created successfully!`
-        };
-
-      case 'CREATE_INVOICE':
-        console.log('Creating invoice with data:', data);
-        
-        // Generate invoice number
-        const { data: invoiceNumber } = await supabase.rpc('get_next_invoice_number', {
-          p_user_id: userId
-        });
+    let invoiceNumber = 'INV-001';
+    if (lastInvoice?.invoice_number) {
+      const lastNum = parseInt(lastInvoice.invoice_number.split('-')[1] || '0');
+      invoiceNumber = `INV-${String(lastNum + 1).padStart(3, '0')}`;
+    }
         
         // Calculate totals
-        const invoiceSubtotal = data.lines.reduce((sum: number, line: any) => sum + line.amount, 0);
-        const invoiceTax = data.tax_amount || 0;
-        const invoiceTotal = invoiceSubtotal + invoiceTax;
+    const subtotal = data.subtotal || data.lines.reduce((sum: number, line: any) => sum + line.amount, 0);
+    const tax_amount = data.tax_amount || 0;
+    const discount_amount = data.discount_amount || 0;
+    const total_amount = subtotal + tax_amount - discount_amount;
         
         // Create invoice
-        const { data: newInvoice, error: invoiceError } = await supabase
+    const { data: invoice, error: invoiceError } = await supabase
           .from('invoices')
           .insert([{
             user_id: userId,
             customer_id: data.customer_id,
-            invoice_number: invoiceNumber || `INV-${Date.now()}`,
-            invoice_date: data.invoice_date || new Date().toISOString().split('T')[0],
+        invoice_number: invoiceNumber,
+        invoice_date: data.invoice_date,
             due_date: data.due_date,
             status: 'draft',
-            subtotal: invoiceSubtotal,
-            tax_amount: invoiceTax,
-            total_amount: invoiceTotal,
-            balance_due: invoiceTotal,
+        subtotal: subtotal,
+        tax_amount: tax_amount,
+        discount_amount: discount_amount,
+        total_amount: total_amount,
+        balance_due: total_amount,
             notes: data.notes || ''
           }])
           .select()
           .single();
 
-        if (invoiceError) throw invoiceError;
+    if (invoiceError) {
+      console.error('Invoice creation error:', invoiceError);
+      throw new Error(`Failed to create invoice: ${invoiceError.message}`);
+    }
 
         // Create invoice lines
-        const invoiceLines = data.lines.map((line: any, index: number) => ({
-          invoice_id: newInvoice.id,
+    const lines = data.lines.map((line: any, index: number) => ({
+      invoice_id: invoice.id,
           description: line.description,
           quantity: line.quantity || 1,
           unit_price: line.unit_price,
@@ -627,432 +564,261 @@ async function performAction(parsedResponse: any, userId: string) {
 
         const { error: linesError } = await supabase
           .from('invoice_lines')
-          .insert(invoiceLines);
-
-        if (linesError) throw linesError;
-
-        return {
-          action: 'CREATE_INVOICE',
-          response: `✅ Invoice ${newInvoice.invoice_number} created successfully! Total: $${invoiceTotal.toFixed(2)}. Status: Draft`
-        };
-
-      case 'CREATE_BILL':
-        console.log('Creating bill with data:', data);
-        
-        // Generate bill number
-        const { data: billNumber } = await supabase.rpc('get_next_bill_number', {
-          p_user_id: userId
-        });
-        
-        // Calculate totals
-        const billSubtotal = data.lines.reduce((sum: number, line: any) => sum + line.amount, 0);
-        const billTax = data.tax_amount || 0;
-        const billTotal = billSubtotal + billTax;
-        
-        // Create bill
-        const { data: newBill, error: billError } = await supabase
-          .from('bills')
-          .insert([{
-            user_id: userId,
-            vendor_id: data.vendor_id,
-            bill_number: billNumber || `BILL-${Date.now()}`,
-            bill_date: data.bill_date || new Date().toISOString().split('T')[0],
-            due_date: data.due_date,
-            status: 'draft',
-            subtotal: billSubtotal,
-            tax_amount: billTax,
-            total_amount: billTotal,
-            balance_due: billTotal,
-            notes: data.notes || ''
-          }])
-          .select()
-          .single();
-
-        if (billError) throw billError;
-
-        // Create bill lines
-        const billLines = data.lines.map((line: any, index: number) => ({
-          bill_id: newBill.id,
-          description: line.description,
-          quantity: line.quantity || 1,
-          unit_price: line.unit_price,
-          amount: line.amount,
-          line_order: index
-        }));
-
-        const { error: billLinesError } = await supabase
-          .from('bill_lines')
-          .insert(billLines);
-
-        if (billLinesError) throw billLinesError;
-
-        return {
-          action: 'CREATE_BILL',
-          response: `✅ Bill ${newBill.bill_number} created successfully! Total: $${billTotal.toFixed(2)}. Status: Draft`
-        };
-
-      case 'CREATE_PRODUCT':
-        const { data: product, error: productError } = await supabase
-          .from('products')
-          .insert([{
-            user_id: userId,
-            type: data.type || 'service',
-            name: data.name,
-            sku: data.sku,
-            description: data.description,
-            unit_price: data.unit_price,
-            cost: data.cost || 0,
-            track_inventory: data.track_inventory || false,
-            quantity_on_hand: data.quantity_on_hand || 0,
-            reorder_point: data.reorder_point || 0,
-            taxable: data.taxable !== false
-          }])
-          .select()
-          .single();
-
-        if (productError) throw productError;
-
-        return {
-          action: 'CREATE_PRODUCT',
-          response: `✅ Product "${data.name}" created successfully! Price: $${data.unit_price}${data.track_inventory ? `, Quantity: ${data.quantity_on_hand}` : ''}`
-        };
-
-      case 'UPDATE_INVENTORY':
-        const { data: productToUpdate } = await supabase
-          .from('products')
-          .select('*')
-          .eq('id', data.product_id)
-          .single();
-
-        if (!productToUpdate) throw new Error('Product not found');
-
-        const newQuantity = data.adjustment_type === 'set' 
-          ? data.quantity 
-          : productToUpdate.quantity_on_hand + data.quantity;
-
-        await supabase
-          .from('products')
-          .update({ quantity_on_hand: newQuantity })
-          .eq('id', data.product_id);
-
-        return {
-          action: 'UPDATE_INVENTORY',
-          response: `✅ Inventory updated for "${productToUpdate.name}"! New quantity: ${newQuantity}`
-        };
-
-      case 'GET_LOW_STOCK':
-        const { data: lowStockProducts } = await supabase
-          .from('products')
-          .select('*')
-          .eq('user_id', userId)
-          .eq('track_inventory', true)
-          .eq('is_active', true);
-
-        const lowStock = lowStockProducts?.filter(p => 
-          p.quantity_on_hand <= p.reorder_point
-        ) || [];
-
-        const lowStockList = lowStock.map(p => 
-          `- ${p.name}: ${p.quantity_on_hand} (reorder at ${p.reorder_point})`
-        ).join('\n');
-
-        return {
-          action: 'GET_LOW_STOCK',
-          response: lowStock.length > 0
-            ? `📦 Low Stock Items:\n${lowStockList}\n\nConsider reordering these items.`
-            : '✅ All products are adequately stocked!'
-        };
-
-      case 'GET_PRODUCT_LIST':
-        const { data: allProducts } = await supabase
-          .from('products')
-          .select('*')
-          .eq('user_id', userId)
-          .eq('is_active', true)
-          .order('name');
-
-        const productList = allProducts?.map(p => 
-          `- ${p.name} (${p.type}): $${p.unit_price}${p.track_inventory ? ` | Stock: ${p.quantity_on_hand}` : ''}`
-        ).join('\n') || 'No products found';
-
-        return {
-          action: 'GET_PRODUCT_LIST',
-          response: `📦 Your Products/Services:\n${productList}`
-        };
-
-      case 'RECORD_INVOICE_PAYMENT':
-        // Update invoice with payment
-        const { data: invoiceData } = await supabase
-          .from('invoices')
-          .select('*')
-          .eq('id', data.invoice_id)
-          .single();
-
-        if (!invoiceData) throw new Error('Invoice not found');
-
-        const newInvoiceAmountPaid = (invoiceData.amount_paid || 0) + data.amount;
-        const newInvoiceBalance = invoiceData.total_amount - newInvoiceAmountPaid;
-        const newInvoiceStatus = newInvoiceBalance === 0 ? 'paid' : 'partial';
-
-        await supabase
-          .from('invoices')
-          .update({
-            amount_paid: newInvoiceAmountPaid,
-            balance_due: newInvoiceBalance,
-            status: newInvoiceStatus,
-            paid_at: newInvoiceStatus === 'paid' ? new Date().toISOString() : null
-          })
-          .eq('id', data.invoice_id);
-
-        return {
-          action: 'RECORD_INVOICE_PAYMENT',
-          response: `✅ Payment of $${data.amount.toFixed(2)} recorded! Invoice ${invoiceData.invoice_number} ${newInvoiceStatus === 'paid' ? 'fully paid' : `has $${newInvoiceBalance.toFixed(2)} remaining`}.`
-        };
-
-      case 'RECORD_BILL_PAYMENT':
-        // Update bill with payment
-        const { data: billData } = await supabase
-          .from('bills')
-          .select('*')
-          .eq('id', data.bill_id)
-          .single();
-
-        if (!billData) throw new Error('Bill not found');
-
-        const newBillAmountPaid = (billData.amount_paid || 0) + data.amount;
-        const newBillBalance = billData.total_amount - newBillAmountPaid;
-        const newBillStatus = newBillBalance === 0 ? 'paid' : 'partial';
-
-        await supabase
-          .from('bills')
-          .update({
-            amount_paid: newBillAmountPaid,
-            balance_due: newBillBalance,
-            status: newBillStatus,
-            paid_at: newBillStatus === 'paid' ? new Date().toISOString() : null
-          })
-          .eq('id', data.bill_id);
-
-        return {
-          action: 'RECORD_BILL_PAYMENT',
-          response: `✅ Payment of $${data.amount.toFixed(2)} recorded! Bill ${billData.bill_number} ${newBillStatus === 'paid' ? 'fully paid' : `has $${newBillBalance.toFixed(2)} remaining`}.`
-        };
-
-      case 'GET_BILLS_DUE':
-        const daysAhead = data.days || 7;
-        const today = new Date();
-        const futureDate = new Date();
-        futureDate.setDate(today.getDate() + daysAhead);
-
-        const { data: billsDue } = await supabase
-          .from('bills')
-          .select('*, vendor:vendors(name)')
-          .eq('user_id', userId)
-          .gte('due_date', today.toISOString().split('T')[0])
-          .lte('due_date', futureDate.toISOString().split('T')[0])
-          .in('status', ['open', 'partial'])
-          .order('due_date', { ascending: true });
-
-        const billsSummary = billsDue?.map(b => 
-          `- ${b.bill_number}: ${b.vendor.name} - $${b.balance_due} due ${b.due_date}`
-        ).join('\n');
-
-        return {
-          action: 'GET_BILLS_DUE',
-          response: billsDue && billsDue.length > 0 
-            ? `📋 Bills due in next ${daysAhead} days:\n${billsSummary}\n\nTotal: $${billsDue.reduce((sum, b) => sum + b.balance_due, 0).toFixed(2)}`
-            : `✅ No bills due in the next ${daysAhead} days!`
-        };
-
-      case 'GET_AGING_REPORT':
-        const { data: overdueInvoices } = await supabase
-          .from('invoices')
-          .select('*, customer:customers(name)')
-          .eq('user_id', userId)
-          .neq('status', 'paid')
-          .neq('status', 'void')
-          .order('due_date', { ascending: true });
-
-        const aging = {
-          current: 0,
-          days_31_60: 0,
-          days_61_90: 0,
-          over_90: 0
-        };
-
-        const todayDate = new Date();
-        overdueInvoices?.forEach(inv => {
-          const dueDate = new Date(inv.due_date);
-          const daysOverdue = Math.floor((todayDate.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24));
-          
-          if (daysOverdue <= 30) aging.current += inv.balance_due;
-          else if (daysOverdue <= 60) aging.days_31_60 += inv.balance_due;
-          else if (daysOverdue <= 90) aging.days_61_90 += inv.balance_due;
-          else aging.over_90 += inv.balance_due;
-        });
-
-        return {
-          action: 'GET_AGING_REPORT',
-          response: `📊 Accounts Receivable Aging:\n` +
-            `Current (0-30 days): $${aging.current.toFixed(2)}\n` +
-            `31-60 days: $${aging.days_31_60.toFixed(2)}\n` +
-            `61-90 days: $${aging.days_61_90.toFixed(2)}\n` +
-            `Over 90 days: $${aging.over_90.toFixed(2)}\n` +
-            `Total Outstanding: $${(aging.current + aging.days_31_60 + aging.days_61_90 + aging.over_90).toFixed(2)}`
-        };
-
-      case 'GET_FINANCIAL_SUMMARY':
-      case 'GET_PROFIT_LOSS':
-        const startDate = data.start_date || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split('T')[0];
-        const endDate = data.end_date || new Date().toISOString().split('T')[0];
-
-        const { data: plTransactions } = await supabase
-          .from('transactions')
-          .select('amount, account:accounts(account_type)')
-          .eq('user_id', userId)
-          .gte('transaction_date', startDate)
-          .lte('transaction_date', endDate);
-
-        let revenue = 0;
-        let expenses = 0;
-
-        plTransactions?.forEach(t => {
-          const amount = parseFloat(t.amount);
-          if (t.account?.account_type === 'revenue' && amount > 0) {
-            revenue += amount;
-          } else if (t.account?.account_type === 'expense' && amount < 0) {
-            expenses += Math.abs(amount);
-          }
-        });
-
-        const netIncome = revenue - expenses;
-
-        return {
-          action: action,
-          response: `📊 Profit & Loss (${startDate} to ${endDate}):\n` +
-            `Revenue: $${revenue.toFixed(2)}\n` +
-            `Expenses: $${expenses.toFixed(2)}\n` +
-            `Net Income: $${netIncome.toFixed(2)} ${netIncome >= 0 ? '✅' : '⚠️'}\n` +
-            `Profit Margin: ${revenue > 0 ? ((netIncome / revenue) * 100).toFixed(1) : '0'}%`
-        };
-
-      case 'GET_BUDGET_STATUS':
-        const { data: budgets } = await supabase
-          .from('budgets')
-          .select('*, categories(name)')
-          .eq('user_id', userId)
-          .eq('is_active', true)
-          .lte('start_date', new Date().toISOString().split('T')[0])
-          .gte('end_date', new Date().toISOString().split('T')[0]);
-
-        const budgetWarnings: string[] = [];
-        budgets?.forEach(b => {
-          const percent = (b.spent_amount / b.amount) * 100;
-          const status = percent >= 100 ? '🔴' : percent >= 80 ? '🟡' : '🟢';
-          budgetWarnings.push(`${status} ${b.name}: $${b.spent_amount.toFixed(2)} / $${b.amount.toFixed(2)} (${percent.toFixed(0)}%)`);
-        });
-
-        return {
-          action: 'GET_BUDGET_STATUS',
-          response: budgetWarnings.length > 0 
-            ? `💰 Budget Status:\n${budgetWarnings.join('\n')}`
-            : '✅ No active budgets for current period'
-        };
-
-      case 'SEND_INVOICE':
-        await supabase
-          .from('invoices')
-          .update({
-            status: 'sent',
-            sent_at: new Date().toISOString()
-          })
-          .eq('id', data.invoice_id)
-          .eq('user_id', userId);
-
-        return {
-          action: 'SEND_INVOICE',
-          response: `✅ Invoice marked as sent!`
-        };
-
-      case 'APPROVE_BILL':
-        await supabase
-          .from('bills')
-          .update({
-            status: 'open'
-          })
-          .eq('id', data.bill_id)
-          .eq('user_id', userId);
-
-        return {
-          action: 'APPROVE_BILL',
-          response: `✅ Bill approved and ready for payment!`
-        };
-
-      case 'GET_CUSTOMER_LIST':
-        const { data: customerList } = await supabase
-          .from('customers')
-          .select('*')
-          .eq('user_id', userId)
-          .eq('is_active', true)
-          .order('name');
-
-        const customersText = customerList?.map(c => 
-          `- ${c.name}${c.company_name ? ` (${c.company_name})` : ''}${c.email ? ` - ${c.email}` : ''}`
-        ).join('\n') || 'No customers found';
-
-        return {
-          action: 'GET_CUSTOMER_LIST',
-          response: `👥 Your Customers:\n${customersText}`
-        };
-
-      case 'GET_VENDOR_LIST':
-        const { data: vendorList } = await supabase
-          .from('vendors')
-          .select('*')
-          .eq('user_id', userId)
-          .eq('is_active', true)
-          .order('name');
-
-        const vendorsText = vendorList?.map(v => 
-          `- ${v.name}${v.company_name ? ` (${v.company_name})` : ''}${v.email ? ` - ${v.email}` : ''}`
-        ).join('\n') || 'No vendors found';
-
-        return {
-          action: 'GET_VENDOR_LIST',
-          response: `🏢 Your Vendors:\n${vendorsText}`
-        };
-
-      case 'CREATE_ACCOUNT':
-        const { data: newAccount, error: accountError } = await supabase
-          .from('accounts')
-          .insert([{
-            user_id: userId,
-            name: data.name,
-            account_type: data.account_type,
-            code: data.code,
-            description: data.description
-          }])
-          .select()
-          .single();
-
-        if (accountError) throw accountError;
-
-        return {
-          action: 'CREATE_ACCOUNT',
-          response: `✅ Account "${data.name}" (${data.account_type}) created successfully!`
-        };
-
-      default:
-        return {
-          action: action,
-          response: parsedResponse.response || "Action completed successfully."
-        };
+      .insert(lines);
+
+    if (linesError) {
+      console.error('Invoice lines error:', linesError);
+      throw new Error(`Failed to create invoice lines: ${linesError.message}`);
     }
-  } catch (error) {
-    console.error('Error performing action:', error);
+
     return {
-      action: action,
-      response: `❌ Error performing action: ${error.message}`
+      response: `✅ Invoice ${invoiceNumber} created successfully! Total: $${total_amount.toFixed(2)}. The invoice is in draft status.`,
+      data: invoice
     };
   }
+
+  if (action === 'EDIT_INVOICE') {
+    // Find invoice
+    let invoice;
+    if (data.invoice_id) {
+      const { data: inv } = await supabase
+        .from('invoices')
+        .select('*')
+        .eq('id', data.invoice_id)
+        .eq('user_id', userId)
+        .single();
+      invoice = inv;
+    } else if (data.invoice_number) {
+      const { data: inv } = await supabase
+        .from('invoices')
+        .select('*')
+        .eq('invoice_number', data.invoice_number)
+        .eq('user_id', userId)
+        .single();
+      invoice = inv;
+    }
+
+    if (!invoice) {
+      throw new Error('Invoice not found');
+    }
+
+    // Calculate new totals
+    const subtotal = data.subtotal || data.lines.reduce((sum: number, line: any) => sum + line.amount, 0);
+    const tax_amount = data.tax_amount !== undefined ? data.tax_amount : invoice.tax_amount;
+    const discount_amount = data.discount_amount !== undefined ? data.discount_amount : invoice.discount_amount;
+    const total_amount = subtotal + tax_amount - discount_amount;
+
+    // Update invoice
+    const { error: updateError } = await supabase
+      .from('invoices')
+      .update({
+        customer_id: data.customer_id || invoice.customer_id,
+        invoice_date: data.invoice_date || invoice.invoice_date,
+        due_date: data.due_date || invoice.due_date,
+        subtotal: subtotal,
+        tax_amount: tax_amount,
+        discount_amount: discount_amount,
+        total_amount: total_amount,
+        balance_due: total_amount - (invoice.amount_paid || 0),
+        notes: data.notes !== undefined ? data.notes : invoice.notes
+      })
+      .eq('id', invoice.id);
+
+    if (updateError) {
+      throw new Error(`Failed to update invoice: ${updateError.message}`);
+    }
+
+    // Update invoice lines if provided
+    if (data.lines && data.lines.length > 0) {
+      // Delete old lines
+      await supabase
+        .from('invoice_lines')
+        .delete()
+        .eq('invoice_id', invoice.id);
+
+      // Create new lines
+      const lines = data.lines.map((line: any, index: number) => ({
+        invoice_id: invoice.id,
+        description: line.description,
+        quantity: line.quantity || 1,
+        unit_price: line.unit_price,
+        amount: line.amount,
+        line_order: index
+      }));
+
+      const { error: linesError } = await supabase
+        .from('invoice_lines')
+        .insert(lines);
+
+      if (linesError) {
+        throw new Error(`Failed to update invoice lines: ${linesError.message}`);
+      }
+    }
+
+    return {
+      response: `✅ Invoice ${invoice.invoice_number} updated successfully! New total: $${total_amount.toFixed(2)}.`,
+      data: { ...invoice, total_amount }
+    };
+  }
+  
+  if (action === 'SEND_INVOICE') {
+    // Find invoice by number or ID
+    let invoice;
+    if (data.invoice_id) {
+      const { data: inv } = await supabase
+        .from('invoices')
+        .select('*')
+        .eq('id', data.invoice_id)
+        .eq('user_id', userId)
+        .single();
+      invoice = inv;
+    } else if (data.invoice_number) {
+      const { data: inv } = await supabase
+        .from('invoices')
+        .select('*')
+        .eq('invoice_number', data.invoice_number)
+        .eq('user_id', userId)
+        .single();
+      invoice = inv;
+    }
+
+    if (!invoice) {
+      throw new Error('Invoice not found');
+    }
+
+    if (invoice.status === 'sent') {
+      return {
+        response: `Invoice ${invoice.invoice_number} has already been sent on ${new Date(invoice.sent_at).toLocaleDateString()}.`
+      };
+    }
+
+    // Update invoice status to sent
+    const { error: updateError } = await supabase
+      .from('invoices')
+      .update({
+        status: 'sent',
+        sent_at: new Date().toISOString()
+      })
+      .eq('id', invoice.id);
+
+    if (updateError) {
+      throw new Error(`Failed to send invoice: ${updateError.message}`);
+    }
+
+    return {
+      response: `✅ Invoice ${invoice.invoice_number} has been marked as sent! The customer should receive it shortly.`,
+      data: { invoice_number: invoice.invoice_number, sent_at: new Date().toISOString() }
+    };
+  }
+
+  if (action === 'LIST_INVOICES') {
+    let query = supabase
+      .from('invoices')
+      .select('*, customer:customers(name)')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(20);
+
+    // Filter by status if provided
+    if (data.status) {
+      query = query.eq('status', data.status);
+    }
+
+    // Filter by customer if provided
+    if (data.customer_id) {
+      query = query.eq('customer_id', data.customer_id);
+    } else if (data.customer_name) {
+      // Find customer by name first
+      const { data: customer } = await supabase
+        .from('customers')
+        .select('id')
+        .eq('user_id', userId)
+        .ilike('name', `%${data.customer_name}%`)
+        .limit(1)
+        .single();
+      
+      if (customer) {
+        query = query.eq('customer_id', customer.id);
+      }
+    }
+
+    const { data: invoices, error } = await query;
+
+    if (error) {
+      throw new Error(`Failed to fetch invoices: ${error.message}`);
+    }
+
+    if (!invoices || invoices.length === 0) {
+      const filterDesc = data.customer_name 
+        ? ` for ${data.customer_name}`
+        : data.status 
+          ? ` with status ${data.status}`
+          : '';
+      return {
+        response: `No invoices found${filterDesc}. ${!data.customer_name && !data.status ? 'Create your first invoice to get started!' : ''}`
+      };
+    }
+
+    const invoiceList = invoices.map(inv => 
+      `📄 ${inv.invoice_number} - ${inv.customer?.name || 'Unknown'} - $${inv.total_amount.toFixed(2)} - ${inv.status}`
+    ).join('\n');
+
+    const filterTitle = data.customer_name 
+      ? `Invoices for ${data.customer_name}`
+      : data.status 
+        ? `${data.status.charAt(0).toUpperCase() + data.status.slice(1)} Invoices`
+        : 'All Invoices';
+
+    return {
+      response: `${filterTitle}:\n\n${invoiceList}\n\n💡 You can send, edit, or view details of any invoice.`,
+      data: invoices
+    };
+  }
+
+  if (action === 'GET_INVOICE') {
+    let invoice;
+    if (data.invoice_id) {
+      const { data: inv } = await supabase
+        .from('invoices')
+        .select('*, customer:customers(name, email), lines:invoice_lines(*)')
+        .eq('id', data.invoice_id)
+        .eq('user_id', userId)
+        .single();
+      invoice = inv;
+    } else if (data.invoice_number) {
+      const { data: inv } = await supabase
+        .from('invoices')
+        .select('*, customer:customers(name, email), lines:invoice_lines(*)')
+        .eq('invoice_number', data.invoice_number)
+        .eq('user_id', userId)
+        .single();
+      invoice = inv;
+    }
+
+    if (!invoice) {
+      return {
+        response: `Invoice ${data.invoice_number || data.invoice_id} not found.`
+      };
+    }
+
+    const lineItems = invoice.lines.map((line: any) => 
+      `• ${line.description}: ${line.quantity} × $${line.unit_price} = $${line.amount.toFixed(2)}`
+    ).join('\n');
+
+    return {
+      response: `📄 Invoice ${invoice.invoice_number}\n\n` +
+        `Customer: ${invoice.customer?.name || 'Unknown'}\n` +
+        `Date: ${new Date(invoice.invoice_date).toLocaleDateString()}\n` +
+        `Due: ${new Date(invoice.due_date).toLocaleDateString()}\n` +
+        `Status: ${invoice.status}\n\n` +
+        `Items:\n${lineItems}\n\n` +
+        `Subtotal: $${invoice.subtotal.toFixed(2)}\n` +
+        (invoice.tax_amount ? `Tax: $${invoice.tax_amount.toFixed(2)}\n` : '') +
+        `Total: $${invoice.total_amount.toFixed(2)}\n` +
+        `Balance Due: $${invoice.balance_due.toFixed(2)}`,
+      data: invoice
+    };
+  }
+  
+  throw new Error(`Unknown action: ${action}`);
 }

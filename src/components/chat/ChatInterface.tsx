@@ -5,25 +5,39 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Card } from '@/components/ui/card';
 import { Send, Bot, User, Paperclip, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { InvoicePreview } from './InvoicePreview';
+import { ModelSelector } from './ModelSelector';
+import { InvoiceListActions } from './InvoiceListActions';
 
 interface Message {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   created_at: string;
+  message_type?: string;
+  metadata?: any;
 }
 
 interface ChatInterfaceProps {
   messages: Message[];
-  onSendMessage: (message: string) => Promise<void>;
+  onSendMessage: (message: string, options?: { model?: string }) => Promise<void>;
   isLoading?: boolean;
 }
 
 export function ChatInterface({ messages, onSendMessage, isLoading = false }: ChatInterfaceProps) {
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<File[]>([]);
+  const [selectedModel, setSelectedModel] = useState(() => {
+    // Load from localStorage or use default
+    return localStorage.getItem('selectedAIModel') || 'meta-llama/llama-3.2-3b-instruct:free';
+  });
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Save selected model to localStorage
+  useEffect(() => {
+    localStorage.setItem('selectedAIModel', selectedModel);
+  }, [selectedModel]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -32,7 +46,7 @@ export function ChatInterface({ messages, onSendMessage, isLoading = false }: Ch
     const message = input.trim();
     setInput('');
     setAttachments([]);
-    await onSendMessage(message);
+    await onSendMessage(message, { model: selectedModel });
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -60,9 +74,20 @@ export function ChatInterface({ messages, onSendMessage, isLoading = false }: Ch
   }, [messages]);
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full overflow-hidden">
+      {/* Header with Model Selector */}
+      <div className="border-b px-4 py-2 flex items-center justify-between bg-background flex-shrink-0">
+        <div className="text-sm text-muted-foreground">
+          AI Accountant
+        </div>
+        <ModelSelector 
+          selectedModel={selectedModel} 
+          onModelChange={setSelectedModel}
+        />
+      </div>
+
       {/* Messages Area */}
-      <ScrollArea className="flex-1 p-4" ref={scrollAreaRef}>
+      <ScrollArea className="flex-1 p-4 overflow-y-auto" ref={scrollAreaRef}>
         <div className="max-w-3xl mx-auto space-y-4">
           {messages.length === 0 ? (
             <div className="text-center py-12">
@@ -87,45 +112,109 @@ export function ChatInterface({ messages, onSendMessage, isLoading = false }: Ch
               </div>
             </div>
           ) : (
-            messages.map((message) => (
-              <div
-                key={message.id}
-                className={cn(
-                  "flex gap-3 mb-4",
-                  message.role === 'user' ? "justify-end" : "justify-start"
-                )}
-              >
-                {message.role === 'assistant' && (
-                  <div className="flex-shrink-0">
-                    <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center">
-                      <Bot className="h-4 w-4 text-primary-foreground" />
-                    </div>
-                  </div>
-                )}
+            messages.map((message) => {
+              // Handle preview messages differently
+              if (message.message_type === 'preview' && message.metadata) {
+                const action = message.metadata.action;
                 
+                // Handle both CREATE_INVOICE and EDIT_INVOICE previews
+                if (action === 'CREATE_INVOICE' || action === 'EDIT_INVOICE') {
+                  return (
+                    <div key={message.id} className="mb-4">
+                      {/* AI Icon for preview */}
+                      <div className="flex gap-3 mb-2">
+                        <div className="flex-shrink-0">
+                          <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center">
+                            <Bot className="h-4 w-4 text-primary-foreground" />
+                          </div>
+                        </div>
+                      </div>
+                      
+                      {/* Preview Component */}
+                      <InvoicePreview
+                        data={message.metadata.data}
+                        message={message.content}
+                        onConfirm={() => onSendMessage('confirm')}
+                        onCancel={() => onSendMessage('cancel')}
+                        isEdit={action === 'EDIT_INVOICE'}
+                      />
+                    </div>
+                  );
+                }
+              }
+
+              // Handle success messages with invoice list data
+              if (message.message_type === 'success' && message.metadata?.data && Array.isArray(message.metadata.data)) {
+                const invoices = message.metadata.data;
+                
+                return (
+                  <div key={message.id} className="mb-4">
+                    <div className="flex gap-3 mb-2">
+                      <div className="flex-shrink-0">
+                        <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center">
+                          <Bot className="h-4 w-4 text-primary-foreground" />
+                        </div>
+                      </div>
+                      <div className="max-w-[70%] rounded-lg px-4 py-2 bg-muted">
+                        <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+                        <p className="text-xs opacity-70 mt-1">
+                          {new Date(message.created_at).toLocaleTimeString()}
+                        </p>
+                      </div>
+                    </div>
+                    
+                    {/* Invoice List with Actions */}
+                    <InvoiceListActions
+                      invoices={invoices}
+                      onSend={(num) => onSendMessage(`send invoice ${num}`)}
+                      onEdit={(num) => onSendMessage(`edit invoice ${num}`)}
+                      onView={(num) => onSendMessage(`show invoice ${num}`)}
+                    />
+                  </div>
+                );
+              }
+
+              // Regular text messages
+              return (
                 <div
+                  key={message.id}
                   className={cn(
-                    "max-w-[70%] rounded-lg px-4 py-2",
-                    message.role === 'user'
-                      ? "bg-primary text-primary-foreground ml-auto"
-                      : "bg-muted"
+                    "flex gap-3 mb-4",
+                    message.role === 'user' ? "justify-end" : "justify-start"
                   )}
                 >
-                  <p className="text-sm whitespace-pre-wrap">{message.content}</p>
-                  <p className="text-xs opacity-70 mt-1">
-                    {new Date(message.created_at).toLocaleTimeString()}
-                  </p>
-                </div>
-
-                {message.role === 'user' && (
-                  <div className="flex-shrink-0">
-                    <div className="w-8 h-8 rounded-full bg-accent flex items-center justify-center">
-                      <User className="h-4 w-4 text-accent-foreground" />
+                  {message.role === 'assistant' && (
+                    <div className="flex-shrink-0">
+                      <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center">
+                        <Bot className="h-4 w-4 text-primary-foreground" />
+                      </div>
                     </div>
+                  )}
+                  
+                  <div
+                    className={cn(
+                      "max-w-[70%] rounded-lg px-4 py-2",
+                      message.role === 'user'
+                        ? "bg-primary text-primary-foreground ml-auto"
+                        : "bg-muted"
+                    )}
+                  >
+                    <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+                    <p className="text-xs opacity-70 mt-1">
+                      {new Date(message.created_at).toLocaleTimeString()}
+                    </p>
                   </div>
-                )}
-              </div>
-            ))
+
+                  {message.role === 'user' && (
+                    <div className="flex-shrink-0">
+                      <div className="w-8 h-8 rounded-full bg-accent flex items-center justify-center">
+                        <User className="h-4 w-4 text-accent-foreground" />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })
           )}
           
           {isLoading && (
@@ -148,7 +237,7 @@ export function ChatInterface({ messages, onSendMessage, isLoading = false }: Ch
       </ScrollArea>
 
       {/* Input Area */}
-      <div className="border-t p-4">
+      <div className="border-t p-4 flex-shrink-0 bg-background">
         <form onSubmit={handleSubmit} className="max-w-3xl mx-auto">
           {/* Attachments Display */}
           {attachments.length > 0 && (

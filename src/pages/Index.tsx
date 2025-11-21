@@ -14,11 +14,12 @@ import { ReportsView } from '@/components/reports/ReportsView';
 import { SalesOrderManager } from '@/components/orders/SalesOrderManager';
 import { PurchaseOrderManager } from '@/components/orders/PurchaseOrderManager';
 import { CreditMemoManager } from '@/components/credit-memos/CreditMemoManager';
+import { ImportManager } from '@/components/import/ImportManager';
 import { useChat } from '@/hooks/useChat';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { MessageCircle, BarChart3, PiggyBank, Users, Truck, FileText, Receipt, Package, BookOpen, TrendingUp, Wallet, ClipboardList, ShoppingCart, ChevronDown, RotateCcw } from 'lucide-react';
+import { MessageCircle, BarChart3, PiggyBank, Users, Truck, FileText, Receipt, Package, BookOpen, TrendingUp, Wallet, ClipboardList, ShoppingCart, ChevronDown, RotateCcw, Upload } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -249,9 +250,9 @@ const Index = () => {
   };
 
   return (
-    <div className="flex h-screen bg-background">
+    <div className="flex h-screen bg-background overflow-hidden">
       {/* Sidebar */}
-      <div className="w-80 flex-shrink-0">
+      <div className="w-80 flex-shrink-0 h-full overflow-hidden">
         <ChatSidebar
           conversations={conversations}
           currentConversationId={currentConversationId}
@@ -263,10 +264,10 @@ const Index = () => {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col">
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full">
+      <div className="flex-1 flex flex-col overflow-hidden">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col overflow-hidden">
           {/* Header Navigation */}
-          <div className="border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+          <div className="border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 flex-shrink-0">
             <div className="flex h-16 items-center px-6">
               <nav className="flex items-center space-x-1 flex-1">
                 <TabsList className="h-10 bg-muted/50">
@@ -372,6 +373,11 @@ const Index = () => {
                     <TrendingUp className="h-4 w-4" />
                     <span className="hidden sm:inline">Reports</span>
                 </TabsTrigger>
+
+                  <TabsTrigger value="import" className="gap-2">
+                    <Upload className="h-4 w-4" />
+                    <span className="hidden sm:inline">Import</span>
+                </TabsTrigger>
               </TabsList>
               </nav>
 
@@ -387,7 +393,7 @@ const Index = () => {
           </div>
           
           {/* Tab Content */}
-          <TabsContent value="chat" className="flex-1 m-0 p-0">
+          <TabsContent value="chat" className="flex-1 m-0 p-0 overflow-hidden">
             <ChatInterface
               messages={messages}
               onSendMessage={sendMessage}
@@ -445,6 +451,10 @@ const Index = () => {
           
           <TabsContent value="budgets" className="flex-1 m-0 p-6 overflow-auto">
             <BudgetManager />
+          </TabsContent>
+          
+          <TabsContent value="import" className="flex-1 m-0 p-0 overflow-auto">
+            <ImportManager />
           </TabsContent>
         </Tabs>
       </div>
